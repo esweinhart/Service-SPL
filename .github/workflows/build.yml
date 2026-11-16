@@ -1,0 +1,89 @@
+# Builds standalone SPL Monitor apps (no Python needed on the target machine)
+# on every push to main, and publishes them to the "latest" GitHub release.
+name: Build apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14          # Apple Silicon (M1/M2/M3/M4)
+            arch: AppleSilicon
+          - runner: macos-15-intel    # Intel Macs
+            arch: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy PySide6 sounddevice pyinstaller
+      - name: Build .app
+        run: |
+          pyinstaller --noconfirm --windowed --name "SPL Monitor" \
+            --osx-bundle-identifier com.splmonitor.app \
+            --collect-data _sounddevice_data \
+            spl_monitor.py
+          APP="dist/SPL Monitor.app"
+          PL="$APP/Contents/Info.plist"
+          # Without this key macOS hands the app silence instead of the mic.
+          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SPL Monitor measures sound level from your microphone.'" "$PL" \
+            || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SPL Monitor measures sound level from your microphone.'" "$PL"
+          /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PL" || true
+          # Ad-hoc sign (free, no Apple developer account) so the mic permission sticks.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          ditto -c -k --keepParent "$APP" "SPL-Monitor-Mac-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SPL-Monitor-Mac-${{ matrix.arch }}
+          path: SPL-Monitor-Mac-${{ matrix.arch }}.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy PySide6 sounddevice pyinstaller
+      - name: Build .exe
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name SPLMonitor --collect-data _sounddevice_data spl_monitor.py
+          Compress-Archive -Path dist\SPLMonitor.exe -DestinationPath SPL-Monitor-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SPL-Monitor-Windows
+          path: SPL-Monitor-Windows.zip
+
+  release:
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish to the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/*.zip --title "SPL Monitor (latest build)" \
+            --notes "Built automatically from commit ${GITHUB_SHA::7}. Download the zip for your computer: Mac Apple Silicon, Mac Intel, or Windows."
