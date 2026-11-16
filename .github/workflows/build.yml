@@ -16,14 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14          # Apple Silicon (M1/M2/M3/M4)
+          - runner: macos-15          # Apple Silicon (M1/M2/M3/M4)
             arch: AppleSilicon
           - runner: macos-15-intel    # Intel Macs
             arch: Intel
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -46,7 +46,7 @@ jobs:
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict "$APP"
           ditto -c -k --keepParent "$APP" "SPL-Monitor-Mac-${{ matrix.arch }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: SPL-Monitor-Mac-${{ matrix.arch }}
           path: SPL-Monitor-Mac-${{ matrix.arch }}.zip
@@ -54,8 +54,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -66,7 +66,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --windowed --name SPLMonitor --collect-data _sounddevice_data spl_monitor.py
           Compress-Archive -Path dist\SPLMonitor.exe -DestinationPath SPL-Monitor-Windows.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: SPL-Monitor-Windows
           path: SPL-Monitor-Windows.zip
@@ -75,7 +75,7 @@ jobs:
     needs: [mac, windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           path: out
           merge-multiple: true
