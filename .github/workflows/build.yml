@@ -73,6 +73,8 @@ jobs:
 
   release:
     needs: [mac, windows]
+    # Publish whatever built, even if one machine type was unavailable.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v6
@@ -80,6 +82,7 @@ jobs:
           path: out
           merge-multiple: true
       - name: Publish to the "latest" release
+        if: ${{ hashFiles('out/*.zip') != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
