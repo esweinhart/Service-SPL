@@ -2161,16 +2161,9 @@ class CalWizard(QtWidgets.QDialog):
         f.addRow("Calibrator level (dB SPL)", self.c_level)
         f.addRow("Calibrator frequency", self.c_freq)
         lay.addLayout(f)
-        lay.addWidget(self._note(
-            "1. Set the mic preamp gain and phantom power where you'll leave them for the service. Changing the "
-            "gain later means calibrating again.\n"
-            "2. Pick the calibrator's level and frequency above (it's printed on the calibrator, usually 94 dB at 1 kHz).\n"
-            "3. Press Start meter if it isn't running.\n"
-            "4. Push the calibrator fully onto the mic capsule (use the 1/2\" or 1/4\" adapter that fits) and switch it on. "
-            "Hold the mic still and keep it away from noise.\n"
-            "5. Wait until it says ● steady, then press Measure (5 s). Don't touch anything while it measures.\n"
-            "6. Press Next and check the reading, then Save.\n"
-            "It measures unweighted (Z), so a 1 kHz or 250 Hz calibrator both work. A reference meter isn't needed here."))
+        lay.addWidget(self._note("1. Set your interface gain where you'll leave it. Don't touch it afterwards.\n"
+                                 "2. Seat the calibrator fully on the mic and switch it on.\n"
+                                 "3. Wait for 'steady', then press Measure."))
         self.c_live = QtWidgets.QLabel("--.- dB")
         self.c_live.setAlignment(QtCore.Qt.AlignCenter)
         self.c_live.setStyleSheet(f"font-size:30pt; font-weight:700; {MONO}")
@@ -2267,11 +2260,10 @@ class CalWizard(QtWidgets.QDialog):
         lay.addWidget(self._note(
             "1. Play steady pink noise at a typical level (75 to 90 dB). Use Theater cal → Play, or your console's "
             "generator.\n2. Put your reference meter right next to the mic, pointing the same way.\n"
-            "3. Set the weighting and speed below to exactly what the reference meter is set to. Easiest: switch "
-            "the handheld to Z (flat) and pick Z here; if it has no Z, use C on both. Slow on both steadies the reading.\n"
+            "3. Set the weighting and speed below to match the reference meter (most read C or A, Slow).\n"
             "4. Type what the reference meter reads, then press Measure (10 s)."))
         f = QtWidgets.QFormLayout()
-        self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["Z", "C", "A"])
+        self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["C", "A", "Z"])
         self.r_t = QtWidgets.QComboBox(); self.r_t.addItems(["Slow", "Fast"])
         self.r_ref = QtWidgets.QDoubleSpinBox(); self.r_ref.setRange(30, 140); self.r_ref.setDecimals(1)
         self.r_ref.setValue(85.0); self.r_ref.setSuffix(" dB")
@@ -3250,18 +3242,11 @@ GUIDE_PAGES = [
 <p>Panels around the meter (RTA, dosimeter, theater cal, session, Planning Center) can be dragged, stacked, floated or
 hidden from the <b>View</b> menu. The layout is remembered.</p>"""),
     ("Calibrate your mic", """<h2>Calibrate your mic</h2>
-<p>Each mic gets a <b>profile</b>. Run <b>Calibrate…</b> and pick one of these:</p>
-<ul><li><b>Acoustic calibrator</b> (best): set your preamp gain first and leave it. Pick the calibrator's level
-(usually 94 dB, 1 kHz), Start the meter, push the calibrator fully onto the mic, switch it on, wait for “● steady”,
-press <b>Measure (5 s)</b>, then Next and Save. It measures unweighted, so 1 kHz and 250 Hz calibrators both work.</li>
-<li><b>Match a reference SPL meter</b>: no calibrator? Play steady pink noise, put your handheld next to the mic and
-set <b>both to the same weighting and speed</b>. Z (flat) and Slow is easiest, or C if the handheld has no Z.
-Type the handheld's reading and press Measure (10 s). A-weighting on one and Z on the other will be several dB apart
-on pink noise.</li>
+<p>Each mic gets a <b>profile</b>. Run <b>Calibrate…</b> and pick one of three ways:</p>
+<ul><li><b>Acoustic calibrator</b> (best): put a 94 or 114 dB calibrator on the mic, wait for “steady”, press Measure.</li>
 <li><b>Cal file</b>: load the UMIK-1/UMIK-2 file from miniDSP (enter your serial number on their site). This fixes the
 frequency response and, with the Mac's input volume for the mic at 100 %, sets the level from the Sens Factor.
-Use the <b>90°</b> file when the mic points at the ceiling. Analog mics like the <b>Audix TM1</b> only get the frequency
-correction from their file. The wizard then takes you to a calibrator or reference-meter step to set the level.</li>
+Use the <b>90°</b> file when the mic points at the ceiling.</li>
 <li><b>Manual</b>: type the mic's mV/Pa and your interface gain, or an offset you already know.</li></ul>
 <p>Tick “pick automatically” and the profile follows that mic whenever you select it. The status bar shows which profile
 is active and warns when a calibration is over 30 days old.</p>"""),

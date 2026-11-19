@@ -79,21 +79,6 @@ itself.
 | **Match a reference SPL meter** | No calibrator, but you have a trusted handheld meter | Play steady pink noise, hold the meter next to the mic, set the **same weighting (A/C/Z) and speed** as the handheld, type its reading and press **Measure (10 s)**. |
 | **Manual** | You know the numbers | Either "0 dBFS sine = X dB SPL", or mic sensitivity (mV/Pa) + preamp gain + interface dBu at 0 dBFS. |
 
-**Acoustic calibrator, step by step**
-1. Set the mic preamp gain (and phantom power for a TM1 / EMM-6) where you'll leave it for the service.
-2. Calibrate… → pick the mic's profile → **Acoustic calibrator**.
-3. Choose the calibrator's level and frequency (printed on it, usually **94 dB, 1 kHz**).
-4. Press **Start meter** if it isn't running.
-5. Push the calibrator fully onto the capsule (use the adapter that fits), switch it on, hold the mic still.
-6. Wait for **● steady**, press **Measure (5 s)**, and don't touch anything until it finishes.
-7. **Next**: the reading should equal the calibrator's level. **Save**.
-
-It measures unweighted (Z), so 1 kHz and 250 Hz calibrators both work.
-
-**Matching a handheld meter instead**
-Set the handheld and ServiceSPL to the **same weighting and speed**. Z (flat) + Slow is easiest; use C on both if
-the handheld has no Z. With pink noise, an A-weighted handheld against a Z or C reading will be several dB apart.
-
 **UMIK tips**
 - Download your mic's file from miniDSP with its serial number. There are two: **0°** (mic pointing at the source) and
   **90°** (mic pointing at the ceiling, typical for rooms and theaters).
@@ -105,9 +90,8 @@ the handheld has no Z. With pink noise, an A-weighted handheld against a Z or C 
 - In Calibrate…, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
   sensitivity are read from it, and the profile is named after the mic (e.g. "TM1 #210345").
 - Analog mics have no Sens Factor, because the level depends on your preamp gain. So the file fixes the *frequency
-  response*, and then you set the *absolute level* with the **acoustic calibrator** or **Match a reference SPL meter**
-  step on the same profile. The wizard goes straight there after you save the file. Do it again whenever you change
-  the preamp gain.
+  response*, and then you set the *absolute level* with the **acoustic calibrator** step on the same profile. Do the
+  calibrator step again whenever you change the preamp gain.
 - Phantom power on, and keep the preamp gain where you'll leave it for the service.
 
 **Compare like with like.** A-weighting reads lower than C or Z on pink noise and bass-heavy sound, often by
