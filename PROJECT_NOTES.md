@@ -1,4 +1,6 @@
-# SPL Monitor: project notes
+# ServiceSPL (formerly SPL Monitor): project notes
+
+Renamed to **ServiceSPL** by Eric on 2026-11-19. Bundle id `com.servicespl.app`; builds are `ServiceSPL-Mac-*.dmg/.zip` and `ServiceSPL-Windows.zip`. The source file stays `spl_monitor.py`. Config moved to a `ServiceSPL` folder; the old `SPLMonitor` config is read on first launch.
 
 ## Hardware / setups
 - **Windows:** Focusrite Scarlett + reference mic, or a mic on the **Waves SoundGrid** network via the SoundGrid ASIO driver (pick the driver channel).
@@ -24,7 +26,7 @@
 - NDI uses ctypes against the user's installed NDI runtime because cyndilib has no Intel-Mac wheel (Universal build).
 - A/C weighting: bilinear transform with a pre-warped 12.2 kHz pole, normalized to 0 dB at 1 kHz. Within IEC 61672 Class 1 tolerance up to 12.5 kHz at 48 kHz.
 - Time weighting: exponential, 125 ms / 1 s. Leq is computed from per-second energy sums (2 h kept).
-- Config: `%APPDATA%\SPLMonitor\config.json` on Windows, `~/Library/Application Support/SPLMonitor/config.json` on Mac.
+- Config: `%APPDATA%\ServiceSPL\config.json` on Windows, `~/Library/Application Support/ServiceSPL/config.json` on Mac (falls back to the old SPLMonitor folder).
 - Mac .app build adds NSMicrophoneUsageDescription and an ad-hoc codesign; without it the mic reads silence.
 
 ## Tested so far (in a Linux sandbox, simulated input)

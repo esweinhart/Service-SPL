@@ -1,4 +1,6 @@
-# SPL Monitor 2.0
+# ServiceSPL 2.0
+
+*(formerly ServiceSPL: your settings and mic profiles carry over automatically)*
 
 A pro sound level meter for services, shows, theaters and mix rooms. It runs as a normal Mac app (no Python needed)
 and on Windows.
@@ -28,18 +30,18 @@ and on Windows.
 ### Mac (no Python needed)
 1. Open this repo's **Releases** page. **latest** is the released version, **preview** is the newest test build of
    work in progress.
-2. Download **SPL-Monitor-Mac-AppleSilicon.zip**. It's a Universal app, so it runs natively on M1/M2/M3/M4 *and* on
-   Intel Macs. (**SPL-Monitor-Mac-Intel.zip** is an Intel-only build, if you prefer.)
-3. Double-click the zip and drag **SPL Monitor** into Applications.
+2. Download **ServiceSPL-Mac-AppleSilicon.dmg** (or the .zip). It's a Universal app, so it runs natively on M1/M2/M3/M4 *and* on
+   Intel Macs. (**ServiceSPL-Mac-Intel.dmg** is an Intel-only build, if you prefer.)
+3. Open the .dmg and drag **ServiceSPL** onto the Applications folder next to it.
 4. First launch: **right-click → Open → Open**. If macOS still refuses, go to System Settings → Privacy & Security,
    scroll down and click **Open Anyway**. (The app is ad-hoc signed, not notarized, which is why macOS asks once.)
 5. Click **Allow** when it asks for the microphone. Missed it? System Settings → Privacy & Security → Microphone →
-   turn on SPL Monitor. Without this, macOS feeds the app silence.
+   turn on ServiceSPL. Without this, macOS feeds the app silence.
 
 A fresh build is made automatically every time the code changes (GitHub Actions, see `.github/workflows/build.yml`).
 
 ### Windows
-Download **SPL-Monitor-Windows.zip** from the same Releases page, unzip and run **SPLMonitor.exe**.
+Download **ServiceSPL-Windows.zip** from the same Releases page, unzip and run **ServiceSPL.exe**.
 
 ### From source (any OS)
 ```
@@ -177,7 +179,7 @@ No Planning Center? **Start item manually…** does the same with names you type
 - **Auto-save folder** (Settings → Logging & reports): press **Find OneDrive** (or Browse). Logs, the PDF report and the
   session CSV then go to
 
-  `<OneDrive>/SPL Monitor/2026/2026-11-23 - Sunday AM/`
+  `<OneDrive>/ServiceSPL/2026/2026-11-23 - Sunday AM/`
 
   (the plan name is added when Planning Center is followed) and OneDrive syncs them. With *"Save the PDF report +
   session CSV automatically when logging stops"* ticked, every stop of logging saves both.
@@ -194,18 +196,18 @@ The menu bar shows `● 87.3` with the dot in green / yellow / red. Click it for
 ### Bitfocus Companion (Stream Deck)
 1. In Companion, create custom variables: `spl_level`, `spl_leq1m`, `spl_leqlong`, `spl_peak`, `spl_dose`,
    `spl_state`, `spl_color`, `spl_item`. Make sure OSC is enabled in Companion (default port **12321**).
-2. In SPL Monitor: Settings → Integrations → tick **Send levels to Bitfocus Companion**, set the Companion computer's IP
+2. In ServiceSPL: Settings → Integrations → tick **Send levels to Bitfocus Companion**, set the Companion computer's IP
    (127.0.0.1 if it's the same Mac).
 3. Put `$(custom:spl_level)` on a button. `spl_state` is `good` / `warn` / `bad` for feedback rules, `spl_color` is
    the hex color.
-4. Or the zero-setup way: fill in **Paint this button** with a location like `1/0/0` (page/row/column). SPL Monitor then
+4. Or the zero-setup way: fill in **Paint this button** with a location like `1/0/0` (page/row/column). ServiceSPL then
    sets that button's text (level + weighting) and background color directly, 4 times a second.
 
 Prefer polling? With **Web view** on, `http://<mac-ip>:8080/api/json` returns all values as JSON and
 `/api/level` returns just the number.
 
 ### NDI
-Press **NDI** on the toolbar. A source called **SPL Monitor** appears on the network with just the meter graphic (thumb,
+Press **NDI** on the toolbar. A source called **ServiceSPL** appears on the network with just the meter graphic (thumb,
 big number, LAeq 1 min, current item, level bar) at 30 fps. Settings → Integrations: name, size (720p, 1080p, 540p or a
 1280×360 lower-third strip) and **transparent background** for keying over video.
 NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: https://ndi.video/tools. The app finds
@@ -246,8 +248,8 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 ## 10. Troubleshooting
 | Problem | Fix |
 |---|---|
-| Reads 20–30 dB, doesn't move | macOS is giving the app silence: System Settings → Privacy & Security → Microphone → SPL Monitor on. Then quit and reopen. |
-| "SPL Monitor can't be opened" | Right-click → Open → Open, or Privacy & Security → Open Anyway. |
+| Reads 20–30 dB, doesn't move | macOS is giving the app silence: System Settings → Privacy & Security → Microphone → ServiceSPL on. Then quit and reopen. (The rename means macOS asks for the mic once more.) |
+| "ServiceSPL can't be opened" | Right-click → Open → Open, or Privacy & Security → Open Anyway. |
 | Levels way off with a UMIK cal file | Input volume must be 100 % in Audio MIDI Setup, and use the right file (0° vs 90°). Check with a calibrator. |
 | NOT CALIBRATED in the status bar | Run Calibrate… for the active profile, or pick the right profile in the toolbar. |
 | "dropouts" in the status bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
@@ -256,7 +258,7 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 | NDI button says runtime not found | Install NDI Tools (ndi.video/tools), or browse to `libndi.dylib` in Settings → Integrations. |
 | Planning Center: "Couldn't connect" | Use a *Personal Access Token* (Application ID + Secret), not your login. Check the Mac has internet. |
 | Planning Center doesn't follow | Someone has to be running **Services Live** for that plan; check you picked today's plan. |
-| Nothing in OneDrive | Settings → Logging: auto-save folder set? Is OneDrive signed in and syncing? Files land under `SPL Monitor/<year>/<date>`. |
+| Nothing in OneDrive | Settings → Logging: auto-save folder set? Is OneDrive signed in and syncing? Files land under `ServiceSPL/<year>/<date>`. |
 | Schedule didn't start | The app must be open (it can be minimized or in mini mode). Check the window's days/date and that it's ticked On. |
 | Theater cal: no sound | Pick the right Output and check the Out numbers match your patch; for ASIO, only that one channel is opened. |
 | Web view: page won't load | Same network? Allow incoming connections on the Mac. Try another port in Settings → Integrations. |
@@ -264,8 +266,8 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 ---
 
 ## 11. Files and data
-- Settings and mic profiles: `~/Library/Application Support/SPLMonitor/config.json` (Mac),
-  `%APPDATA%\SPLMonitor\config.json` (Windows). The Planning Center secret is in the macOS Keychain.
+- Settings and mic profiles: `~/Library/Application Support/ServiceSPL/config.json` (Mac),
+  `%APPDATA%\ServiceSPL\config.json` (Windows). On first launch, settings from the old `SPLMonitor` folder are read in. The Planning Center secret is in the macOS Keychain.
 - Logs: `Documents/SPL Logs` by default, or the auto-save folder.
 - Tests: `python tests/test_iec61672.py` (weighting, time weighting, Leq, peak) and `python tests/test_engine.py`
   (true peak, RTA, cal files, dose, pink noise, Ln, EQ, OSC, schedule). Both run in CI before every Mac build.

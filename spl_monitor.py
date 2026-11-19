@@ -1,5 +1,5 @@
 """
-SPL Monitor - pro sound level meter for Mac and Windows.
+ServiceSPL - pro sound level meter for Mac and Windows.
 
 Main meter + Leq / Ln statistics, calibration wizard with per-mic profiles (UMIK-style cal files),
 1/3-octave RTA + spectrogram, OSHA/NIOSH dosimeter, theater calibration (pink noise generator),
@@ -22,13 +22,15 @@ try:
 except Exception:  # PortAudio missing -> simulator only
     sd = None
 
-APP_NAME = "SPL Monitor"
+APP_NAME = "ServiceSPL"
 APP_VERSION = "2.0"
 if sys.platform == "darwin":
-    CFG_DIR = os.path.expanduser("~/Library/Application Support/SPLMonitor")
+    _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
-    CFG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "SPLMonitor")
+    _CFG_BASE = os.environ.get("APPDATA", os.path.expanduser("~"))
+CFG_DIR = os.path.join(_CFG_BASE, "ServiceSPL")
 CFG_PATH = os.path.join(CFG_DIR, "config.json")
+OLD_CFG_PATH = os.path.join(_CFG_BASE, "SPLMonitor", "config.json")   # settings from the "SPL Monitor" days
 SIM_NAME = "Simulated pink noise (test)"
 SIM_CAL_NAME = "Simulated 94 dB calibrator (test)"
 SIM_OUT = "Simulated (no audio out)"
@@ -55,7 +57,7 @@ DEFAULTS = dict(
                  level=-20.0, out_device=None, outputs={}, targets={}),
     session_view=600, venue="", operator="",
     companion_on=False, companion_host="127.0.0.1", companion_port=12321, companion_button="",
-    ndi_name="SPL Monitor", ndi_size="1280x720", ndi_transparent=False, ndi_lib="",
+    ndi_name="ServiceSPL", ndi_size="1280x720", ndi_transparent=False, ndi_lib="",
     autosave_dir="", autosave_reports=True, schedule=[],
     pco_app_id="", pco_target=95.0, pco_service_type=None,
     win_geom=None, dock_state=None,
@@ -2217,7 +2219,7 @@ class MenuBarMeter:
         for a in self.lines:
             a.setEnabled(False)
         self.menu.addSeparator()
-        self.menu.addAction("Show SPL Monitor", main.exit_mini)
+        self.menu.addAction("Show ServiceSPL", main.exit_mini)
         self.menu.addAction("Mini meter", main.enter_mini)
         self.a_run = self.menu.addAction("Start", main.run_btn.click)
         self.menu.addAction("Drop marker", lambda: main.add_marker())
@@ -2364,9 +2366,12 @@ def secret_get(account):
     """Read a secret from the macOS Keychain (or the config fallback elsewhere)."""
     if sys.platform == "darwin":
         try:
-            r = subprocess.run(["security", "find-generic-password", "-s", "SPL Monitor", "-a", account, "-w"],
-                               capture_output=True, text=True, timeout=5)
-            return r.stdout.strip() if r.returncode == 0 else ""
+            for service in ("ServiceSPL", "SPL Monitor"):
+                r = subprocess.run(["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    return r.stdout.strip()
+            return ""
         except Exception:
             return ""
     return ""
@@ -2375,7 +2380,7 @@ def secret_get(account):
 def secret_set(account, value):
     if sys.platform == "darwin":
         try:
-            subprocess.run(["security", "add-generic-password", "-U", "-s", "SPL Monitor", "-a", account, "-w", value],
+            subprocess.run(["security", "add-generic-password", "-U", "-s", "ServiceSPL", "-a", account, "-w", value],
                            capture_output=True, timeout=5)
             return True
         except Exception:
@@ -2393,7 +2398,7 @@ class PcoClient:
     def get(self, path, **params):
         url = self.BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
         req = urllib.request.Request(url, headers={"Authorization": self.auth, "Accept": "application/json",
-                                                   "User-Agent": f"SPL-Monitor/{APP_VERSION}"})
+                                                   "User-Agent": f"ServiceSPL/{APP_VERSION}"})
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.load(r)
 
@@ -2774,7 +2779,7 @@ class EqPlot(QtWidgets.QWidget):
 
 
 GUIDE_PAGES = [
-    ("Welcome", """<h2>Welcome to SPL Monitor</h2>
+    ("Welcome", """<h2>Welcome to ServiceSPL</h2>
 <p>This guide walks you through setting up and using the meter. Pick a topic on the left, or press <b>Next</b>.</p>
 <ol><li><b>Pick your mic</b> in the toolbar input menu (a UMIK or other USB measurement mic is picked automatically).</li>
 <li>Press <b>▶ Start</b>. The big number is the live level; the strip under it is the last few minutes.</li>
@@ -2822,12 +2827,12 @@ Planning Center item.</li>
 report are saved there in dated folders (YYYY / YYYY-MM-DD - plan) and OneDrive syncs them.</li>
 <li><b>PDF report</b>: summary, time history, markers, alarms and per-item levels for the service.</li></ul>"""),
     ("Companion, NDI & web", """<h2>Stream Deck (Companion), NDI and web view</h2>
-<ul><li><b>Companion</b>: enable it in Settings → Integrations. SPL Monitor sends OSC to Companion (port 12321) and sets
+<ul><li><b>Companion</b>: enable it in Settings → Integrations. ServiceSPL sends OSC to Companion (port 12321) and sets
 custom variables <code>spl_level</code>, <code>spl_leq1m</code>, <code>spl_leqlong</code>, <code>spl_peak</code>,
 <code>spl_dose</code>, <code>spl_state</code>, <code>spl_color</code>, <code>spl_item</code>. Create those custom variables
 in Companion, then use <code>$(custom:spl_level)</code> on a button. Or give a button location (page/row/column) and
-SPL Monitor paints that button's text and color directly.</li>
-<li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “SPL Monitor” for your
+ServiceSPL paints that button's text and color directly.</li>
+<li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “ServiceSPL” for your
 switcher. Needs the free NDI Tools/runtime installed. Tick “transparent background” for a key-able overlay.</li>
 <li><b>Web view</b>: shows the big number in any browser on the network; <code>/api/json</code> and <code>/api/level</code>
 give the numbers to other software.</li></ul>"""),
@@ -2847,7 +2852,7 @@ class GuideWizard(QtWidgets.QDialog):
     def __init__(self, main, start="Welcome"):
         super().__init__(main)
         self.main = main
-        self.setWindowTitle("SPL Monitor guide")
+        self.setWindowTitle("ServiceSPL guide")
         self.resize(940, 640)
         h = QtWidgets.QHBoxLayout(self)
         self.nav = QtWidgets.QListWidget()
@@ -3197,7 +3202,7 @@ async function poll(){
   const v=document.getElementById("val");
   v.textContent=d.value==null?"--.-":d.value.toFixed(1);v.style.color=d.color;
   document.getElementById("sub").textContent=d.sub;thumb(d.state);}
- catch(e){document.getElementById("sub").textContent="no connection to SPL Monitor";
+ catch(e){document.getElementById("sub").textContent="no connection to ServiceSPL";
   document.getElementById("val").style.color="#8a9099";thumb("off");}
  setTimeout(poll,200);}
 poll();
@@ -3326,7 +3331,7 @@ class SettingsDialog(QtWidgets.QDialog):
         f.addRow("Auto-save folder", row2)
         f.addRow("", self.auto_rep)
         f.addRow("", QtWidgets.QLabel("With an auto-save folder, logs and reports go to\n"
-                                      "<folder>/SPL Monitor/YYYY/YYYY-MM-DD[ - plan]/ instead of the log folder."))
+                                      "<folder>/ServiceSPL/YYYY/YYYY-MM-DD[ - plan]/ instead of the log folder."))
 
         # --- integrations
         f = page("Integrations")
@@ -3387,7 +3392,7 @@ class SettingsDialog(QtWidgets.QDialog):
                    autosave_dir=self.auto.text().strip(), autosave_reports=self.auto_rep.isChecked(),
                    companion_on=self.comp.isChecked(), companion_host=self.ch.text().strip() or "127.0.0.1",
                    companion_port=self.cp.value(), companion_button=self.cb.text().strip(),
-                   ndi_name=self.ndi_name.text().strip() or "SPL Monitor", ndi_size=self.ndi_size.currentText(),
+                   ndi_name=self.ndi_name.text().strip() or "ServiceSPL", ndi_size=self.ndi_size.currentText(),
                    ndi_transparent=self.ndi_tr.isChecked(), ndi_lib=self.ndi_lib.text().strip())
 
 
@@ -3544,11 +3549,14 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- config
     def load_cfg(self):
         cfg = copy.deepcopy(DEFAULTS)
-        try:
-            with open(CFG_PATH) as f:
-                saved = json.load(f)
-        except Exception:
-            saved = {}
+        saved = {}
+        for path in (CFG_PATH, OLD_CFG_PATH):      # carry settings + mic profiles over from SPL Monitor
+            try:
+                with open(path) as f:
+                    saved = json.load(f)
+                break
+            except Exception:
+                continue
         if saved and "profiles" not in saved:      # v1 config: turn the single calibration into a profile
             saved["profiles"] = {"Default": dict(DEFAULTS["profiles"]["Default"],
                                                  offset=saved.get("cal_offset", 120.0),
@@ -3707,6 +3715,9 @@ class MainWindow(QtWidgets.QMainWindow):
         hm.addAction("Guide…", lambda: self.guide())
         hm.addAction("Room EQ helper…", lambda: self.guide("Room EQ"))
         hm.addAction("Theater calibration help", lambda: self.guide("Theater calibration"))
+        hm.addSeparator()
+        about = hm.addAction(f"About {APP_NAME}", self.about)
+        about.setMenuRole(QtGui.QAction.AboutRole)
         self.refresh_profiles()
         self.apply_cfg_to_ui()
 
@@ -3967,6 +3978,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.items.append((time.time(), self.current_item))
         self.session_panel.graph.update()
 
+    def about(self):
+        QtWidgets.QMessageBox.about(self, f"About {APP_NAME}",
+            f"<h2>{APP_NAME} {APP_VERSION}</h2>"
+            "<p>Sound level meter for services, shows and theaters: Leq, RTA, dosimetry, theater calibration, "
+            "logging and reports, Planning Center, Companion and NDI.</p>"
+            "<p>A/C weighting and Fast/Slow per IEC 61672-1 · 1/3 octaves per IEC 61260.</p>"
+            "<p>Built with Python, Qt (PySide6), NumPy, SciPy and PortAudio. NDI® is a registered trademark of Vizrt NDI AB.</p>")
+
     def guide(self, page="Welcome"):
         GuideWizard(self, page).exec()
 
@@ -3991,7 +4010,7 @@ class MainWindow(QtWidgets.QMainWindow):
         name = day.strftime("%Y-%m-%d")
         if self.pco_plan_label:
             name += " - " + re.sub(r'[\\/:*?"<>|]+', "-", self.pco_plan_label)[:60].strip()
-        return os.path.join(base, "SPL Monitor", day.strftime("%Y"), name)
+        return os.path.join(base, "ServiceSPL", day.strftime("%Y"), name)
 
     def export_csv(self, path=None):
         if not len(self.session):
