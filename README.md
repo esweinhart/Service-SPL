@@ -21,6 +21,8 @@ and on Windows.
 - **NDI** output of just the meter graphic, for your video switcher
 - **Mac menu bar** readout (`● 87.3`, dot goes green/yellow/red), a mini always-on-top meter, and a **web view**
 - Dashboard layout: every panel can be shown, hidden, dragged, stacked or floated. Follows macOS light/dark.
+- A second toolbar row has one button per panel (RTA, Spectrogram, Dosimeter, Theater cal, Session, Planning Center), plus **¼ screen** and **Fit**
+- Little **!** marks next to readings and settings: hover over one for a plain-English explanation of LAeq, LAFmax, LCpeak, L10/L90, A/C/Z weighting, Fast/Slow, dose, TWA, dBFS and more
 - A built-in **Guide** (toolbar **? Guide**) walks you through all of this inside the app
 
 ---
@@ -115,9 +117,12 @@ calibrated, and turns yellow when the calibration is more than 30 days old.
 Use the **View** menu to show/hide panels. Drag a panel's title bar to move it, drop it on another to stack them as
 tabs, or double-click to float it. The layout is saved when you quit.
 
-### RTA · 1/3 octave + spectrogram
-Weighting Z/A/C, speed Fast/Slow/**Leq** (average since *Reset peaks / Leq*). White ticks are peak hold. The
-spectrogram scrolls the last ~20 seconds, 20 Hz at the bottom to 20 kHz at the top.
+### RTA · 1/3 octave
+Weighting Z/A/C, speed Fast/Slow/**Leq** (average since **Reset**). White ticks are peak hold.
+
+### Spectrogram
+Its own panel, so you can place it anywhere or close it. It scrolls the last ~20 seconds, 20 Hz at the bottom to
+20 kHz at the top, and brighter means louder. It's good for spotting feedback rings and hum.
 
 ### Dosimeter · OSHA / NIOSH
 | Meter | Criterion | Exchange | Threshold | Notes |

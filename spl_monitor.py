@@ -52,7 +52,7 @@ DEFAULTS = dict(
     alarm_rules=[dict(on=True, metric="LAeq long", thr=100.0),
                  dict(on=True, metric="LCpeak", thr=135.0),
                  dict(on=False, metric="LCeq long", thr=115.0)],
-    rta_weight="Z", rta_speed="F", rta_spectro=True, spec_top=100.0, spec_range=70.0,
+    rta_weight="Z", rta_speed="F", spec_top=100.0, spec_range=70.0,
     theater=dict(layout="5.1", preset="Cinema / dub stage", noise="SMPTE band-limited (500 Hz - 2 kHz)",
                  level=-20.0, out_device=None, outputs={}, targets={}),
     session_view=600, venue="", operator="",
@@ -604,6 +604,13 @@ QPushButton#log:checked {{ background:{T['rec']}; border-color:{T['red']}; }}
 QPushButton:disabled {{ color:{T['dim']}; }}
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QPlainTextEdit {{ background:{T['field']}; border:1px solid {T['btn_border']};
     border-radius:4px; padding:3px 6px; }}
+QComboBox {{ combobox-popup: 0; }}
+QComboBox QAbstractItemView {{ background:{T['panel']}; color:{T['fg']}; border:1px solid {T['btn_border']};
+    selection-background-color:{T['hover']}; selection-color:{T['fg']}; outline:0; padding:2px; }}
+QComboBox QAbstractItemView::item {{ min-height:22px; padding:2px 10px; color:{T['fg']}; }}
+QComboBox QAbstractItemView::item:selected, QComboBox QAbstractItemView::item:hover {{ background:{T['hover']}; }}
+QToolButton:checked {{ background:{T['checked']}; border-color:{T['green']}; }}
+QToolBar#tools_bar QToolButton {{ padding:3px 10px; margin:1px 2px; }}
 QTableWidget, QListWidget {{ background:{T['panel']}; border:1px solid {T['border']}; gridline-color:{T['border']}; }}
 QHeaderView::section {{ background:{T['btn']}; color:{T['dim']}; border:none; padding:3px; }}
 QDockWidget {{ color:{T['dim']}; font-weight:600; }}
@@ -644,12 +651,190 @@ def energy_mean(vals):
 
 # ------------------------------------------------------------- widgets ----
 
+# ---------- plain-English glossary for the little "!" tips
+WEIGHT_TXT = {
+    "A": "<b>A-weighting</b> hears the way your ears do at normal listening levels: it turns down the deep "
+         "lows and the very top. It's the standard for loudness and hearing safety (OSHA, WHO, venue limits).",
+    "C": "<b>C-weighting</b> is almost flat and keeps the low end. Use it to see bass and subwoofer energy, "
+         "and for peaks and theater calibration (85 dBC).",
+    "Z": "<b>Z-weighting</b> is zero weighting, completely flat from 10 Hz to 20 kHz, with no ear correction.",
+}
+TIME_TXT = {
+    "F": "<b>Fast</b> (125 ms) follows quick changes: drum hits and speech syllables.",
+    "S": "<b>Slow</b> (1 s) is smoother and easier to read. It's used for OSHA dose and speaker calibration.",
+}
+METRIC_TXT = {
+    "eq": "<b>eq</b> (equivalent continuous level) is the energy average over the period. It's the one number "
+          "that sums up how loud a song, set or service really was. Short loud moments count more than you'd think.",
+    "max": "<b>max</b> is the highest time-weighted level reached since you last pressed Reset.",
+    "min": "<b>min</b> is the lowest time-weighted level reached since you last pressed Reset.",
+    "peak": "<b>peak</b> is the highest instantaneous (true) peak, with no averaging. It catches transients like a "
+            "kick drum or a dropped mic that the meter needle would miss. It's measured 4x oversampled.",
+    "10": "<b>L10</b> is the level exceeded 10 % of the time: the loud parts of the program.",
+    "50": "<b>L50</b> is the level exceeded half the time: the median level.",
+    "90": "<b>L90</b> is the level exceeded 90 % of the time: the background noise floor "
+          "(HVAC, crowd, room tone) under the program.",
+}
+GLOSSARY = {
+    "Weighting": "<b>Frequency weighting</b> is a filter that decides how much each frequency counts.<br><br>"
+                 + WEIGHT_TXT["A"] + "<br><br>" + WEIGHT_TXT["C"] + "<br><br>" + WEIGHT_TXT["Z"],
+    "Speed": "<b>Time weighting</b> is how quickly the meter reacts.<br><br>" + TIME_TXT["F"] + "<br><br>" + TIME_TXT["S"],
+    "RTA speed": "How quickly the bars react.<br><br>" + TIME_TXT["F"] + "<br><br>" + TIME_TXT["S"]
+                 + "<br><br><b>Leq</b> averages everything since Reset. It's great for a steady, settled view "
+                   "while you EQ the room with pink noise.",
+    "RTA": "<b>RTA (real-time analyzer)</b> splits the sound into 31 one-third-octave bands, from 20 Hz to 20 kHz. "
+           "Each bar is the level of one band, and the white ticks hold the peaks. Use it with pink noise to spot "
+           "room modes and to EQ: a flat room shows roughly level bars.",
+    "Spectrogram": "<b>Spectrogram</b> shows the spectrum over time. Frequency runs low to high, time scrolls, "
+                   "and brighter means louder. It's handy for catching feedback rings (a bright steady line), hum "
+                   "(lines at 60/120 Hz) and how the bass builds through a song.",
+    "Red at": "The level where the big number turns <b>red</b> (thumbs down). It turns yellow a few dB before "
+              "this (set in Settings, Meter). Alarm rules in the Session panel can also log or flash at their own levels.",
+    "Dose": "<b>Noise dose</b> is how much of a day's allowed sound exposure has been used so far. 100 % is the "
+            "full daily limit. Louder sound uses it up much faster: with a 3 dB exchange rate, every +3 dB halves "
+            "the safe time.",
+    "OSHA PEL": "<b>OSHA PEL</b> (Permissible Exposure Limit) is the US legal limit: 90 dBA for 8 hours with a "
+                "5 dB exchange rate (95 dBA = 4 h, 100 dBA = 2 h). Sound under 90 dB isn't counted. Slow response.",
+    "OSHA HC": "<b>OSHA HC</b> (Hearing Conservation) is the action level. At 50 % here (85 dBA TWA), employers "
+               "must start a hearing conservation program. It counts sound from 80 dB up.",
+    "NIOSH": "<b>NIOSH REL</b> (Recommended Exposure Limit) is the stricter, science-based recommendation: "
+             "85 dBA for 8 hours with a 3 dB exchange rate (88 dBA = 4 h, 94 dBA = 1 h). Use this one to "
+             "protect your team's and congregation's hearing.",
+    "Dose line": "<b>TWA</b> (time-weighted average) is the steady level that would give the same dose over "
+                 "8 hours.<br><b>8 h projection</b> is the dose you'd reach if this level kept going for a "
+                 "full 8 hours.<br><b>100 % in</b> is how long until the daily limit at the current pace.",
+    "dBFS": "<b>dBFS</b> is decibels relative to digital full scale. 0 dBFS is the loudest the converter can "
+            "do. This uses the AES17 convention, where a full-scale sine reads 0 dBFS RMS. Cinema pink noise "
+            "is -20 dBFS RMS.",
+    "Theater": "<b>Theater calibration</b> plays band-limited pink noise through one speaker at a time. "
+               "Turn that channel's amp or processor gain until it reads the target (C-weighted, Slow). The "
+               "film standard is 85 dBC per screen channel at -20 dBFS (82 dBC for surrounds in many rooms). "
+               "The LFE reads about 10 dB higher in-band.",
+    "dBC Slow": "Measured C-weighted with Slow response, as the cinema calibration standard (SMPTE RP 200) calls for.",
+    "Mic profile": "A <b>mic profile</b> stores a microphone's calibration offset and its frequency-response "
+                   "file (for example a miniDSP UMIK .txt). That way readings are correct for that mic. Use "
+                   "Calibrate… to make one.",
+    "Long window": "The window used by the long LAeq / LCeq and by L10 / L90. 15 minutes is common for "
+                   "worship and live sound, and 60 minutes for venue noise limits.",
+}
+
+
+def explain(term):
+    """Plain-English help for a meter label such as 'LAeq 15 min', 'LCpeak', 'LAF' or 'LA90'."""
+    term = (term or "").strip()
+    if term in GLOSSARY:
+        return GLOSSARY[term]
+    m = re.match(r"^L([ACZ])(F|S)?(eq|max|min|peak|10|50|90)?\b(.*)$", term.split("   ")[0])
+    if not m:
+        return ""
+    w, t, metric, rest = m.groups()
+    rest = rest.strip()
+    when = f", over the last {rest}" if rest[:1].isdigit() else f", {rest}" if rest else ""
+    parts = [f"<b>{m.group(0).strip()}</b>: sound level in decibels (dB){when}."]
+    if metric:
+        parts.append(METRIC_TXT[metric])
+    parts.append(WEIGHT_TXT[w])
+    if t:
+        parts.append(TIME_TXT[t])
+    if term.split("   ")[0].strip() in ("LAF", "LAS", "LCF", "LCS", "LZF", "LZS"):
+        parts.insert(1, "This is the live level, updated many times a second.")
+    if metric in ("10", "90"):
+        parts.append("They're computed from the A-weighted Fast level.")
+    return "<br><br>".join(parts)
+
+
+class InfoTip(QtWidgets.QLabel):
+    """A small round '!' you hover (or click) for an explanation."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self.setFixedSize(15, 15)
+        self.setCursor(QtCore.Qt.WhatsThisCursor)
+        self.set_text(text)
+
+    def set_text(self, text):
+        self.text_html = text
+        self.setToolTip(f"<div style='max-width:320px'>{text}</div>" if text else "")
+        self.setVisible(bool(text))
+
+    def paintEvent(self, ev):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        col = QtGui.QColor(T["dim"])
+        p.setPen(QtGui.QPen(col, 1.3))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawEllipse(QtCore.QRectF(1, 1, 13, 13))
+        f = self.font(); f.setPointSizeF(7.5); f.setBold(True)
+        p.setFont(f)
+        p.drawText(QtCore.QRectF(0, 0, 15, 15), QtCore.Qt.AlignCenter, "!")
+
+    def enterEvent(self, ev):
+        QtWidgets.QToolTip.showText(self.mapToGlobal(QtCore.QPoint(16, 16)), self.toolTip(), self)
+
+    def mousePressEvent(self, ev):
+        QtWidgets.QToolTip.showText(self.mapToGlobal(QtCore.QPoint(16, 16)), self.toolTip(), self)
+
+
+def with_tip(widget, key, stretch=True):
+    """Wrap a control with a '!' tip beside it (for form rows)."""
+    box = QtWidgets.QWidget()
+    h = QtWidgets.QHBoxLayout(box)
+    h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
+    h.addWidget(widget, 1 if stretch else 0)
+    h.addWidget(InfoTip(GLOSSARY.get(key) or explain(key)))
+    if not stretch:
+        h.addStretch()
+    return box
+
+
+class ComboFixer(QtCore.QObject):
+    """App-wide: give every drop-down a plain list whose items always show, sized to the
+    longest option and kept on screen (the macOS-style popup hid items and got clipped)."""
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t == QtCore.QEvent.Polish and isinstance(obj, QtWidgets.QComboBox) and not obj.property("_fixed"):
+            obj.setProperty("_fixed", True)
+            obj.setItemDelegate(QtWidgets.QStyledItemDelegate(obj))
+        elif t == QtCore.QEvent.Show and obj.isWidgetType() and obj.isWindow() \
+                and isinstance(obj.parent(), QtWidgets.QComboBox):
+            QtCore.QTimer.singleShot(0, lambda o=obj: self.fit(o))
+        return False
+
+    @staticmethod
+    def fit(popup):
+        combo = popup.parent()
+        view = combo.view()
+        need = view.sizeHintForColumn(0) + 2 * view.frameWidth() + 28
+        if view.verticalScrollBar().isVisible():
+            need += view.verticalScrollBar().width()
+        g = popup.geometry()
+        if g.width() < need:
+            g.setWidth(need)
+        scr = (combo.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
+        if g.right() > scr.right():
+            g.moveRight(scr.right())
+        if g.left() < scr.left():
+            g.moveLeft(scr.left())
+        if g.bottom() > scr.bottom():
+            g.moveBottom(scr.bottom())
+        if g.top() < scr.top():
+            g.moveTop(scr.top())
+        if g != popup.geometry():
+            popup.setGeometry(g)
+
+
+def install_combo_fixer(app):
+    if not getattr(app, "_combo_fixer", None):
+        app._combo_fixer = ComboFixer(app)
+        app.installEventFilter(app._combo_fixer)
+
+
 class Tile(QtWidgets.QFrame):
     def __init__(self, title, size=22, tip=""):
         super().__init__()
         self.setObjectName("tile")
-        if tip:
-            self.setToolTip(tip)
+        self.tip = tip
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(10, 6, 10, 6)
         lay.setSpacing(0)
@@ -663,10 +848,18 @@ class Tile(QtWidgets.QFrame):
         self.s.setAlignment(QtCore.Qt.AlignRight)
         self.size = size
         self.color = None
-        for w in (self.t, self.v, self.s):
+        self.info = InfoTip()
+        row = QtWidgets.QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(5)
+        row.addWidget(self.t, 1); row.addWidget(self.info, 0, QtCore.Qt.AlignTop)
+        lay.addLayout(row)
+        for w in (self.v, self.s):
             lay.addWidget(w)
+        self._update_info(title)
         self.refresh_theme()
         self.set(None)
+
+    def _update_info(self, title):
+        self.info.set_text(explain(title) or self.tip)
 
     def refresh_theme(self):
         self.t.setStyleSheet(f"color:{T['dim']}; font-size:9pt; background:transparent;")
@@ -692,8 +885,9 @@ class Tile(QtWidgets.QFrame):
             self._paint_value()
         if sub is not None:
             self.s.setText(sub)
-        if title:
+        if title and title != self.t.text():
             self.t.setText(title)
+            self._update_info(title)
 
 
 class LevelBar(QtWidgets.QWidget):
@@ -1242,19 +1436,18 @@ class RtaPanel(QtWidgets.QWidget):
         self.sp.setCurrentText({"F": "Fast", "S": "Slow", "Leq": "Leq"}[c["rta_speed"]])
         rst = QtWidgets.QPushButton("Reset"); rst.setToolTip("Reset peak hold and the Leq average")
         rst.clicked.connect(self.reset)
-        self.spec = QtWidgets.QCheckBox("Spectro"); self.spec.setChecked(c["rta_spectro"])
-        self.spec.setToolTip("Show the scrolling spectrogram")
-        self.spec.toggled.connect(self._spec_toggled)
-        for lab, wdg in (("Weighting", self.w), ("Speed", self.sp)):
-            row.addWidget(QtWidgets.QLabel(lab)); row.addWidget(wdg)
-        row.addWidget(rst); row.addStretch(); row.addWidget(self.spec)
+        for w in (self.w, self.sp):
+            w.setMinimumWidth(70)
+        for lab, wdg, key in (("Weighting", self.w, "Weighting"), ("Speed", self.sp, "RTA speed")):
+            row.addWidget(QtWidgets.QLabel(lab)); row.addWidget(wdg); row.addWidget(InfoTip(GLOSSARY[key]))
+            row.addSpacing(6)
+        row.addWidget(rst); row.addStretch(); row.addWidget(InfoTip(GLOSSARY["RTA"]))
         v.addLayout(row)
         self.rta = RtaWidget()
-        v.addWidget(self.rta, 3)
+        v.addWidget(self.rta, 1)
+        # the spectrogram is fed from here but lives in its own dock (SpectroPanel)
         self.spectro = SpectrogramWidget()
         self.spectro.top, self.spectro.range = c["spec_top"], c["spec_range"]
-        v.addWidget(self.spectro, 2)
-        self.spectro.setVisible(c["rta_spectro"])
         self.w.currentTextChanged.connect(self._save)
         self.sp.currentTextChanged.connect(self._save)
         self.fs = None
@@ -1263,10 +1456,6 @@ class RtaPanel(QtWidgets.QWidget):
         self.main.cfg["rta_weight"] = self.w.currentText()
         self.main.cfg["rta_speed"] = {"Fast": "F", "Slow": "S", "Leq": "Leq"}[self.sp.currentText()]
         self.rta.reset_peaks()
-
-    def _spec_toggled(self, on):
-        self.main.cfg["rta_spectro"] = on
-        self.spectro.setVisible(on)
 
     def reset(self):
         self.rta.reset_peaks()
@@ -1277,16 +1466,21 @@ class RtaPanel(QtWidgets.QWidget):
     def active(self):
         return self.isVisible() and self.visibleRegion().isEmpty() is False
 
+    @staticmethod
+    def _shown(w):
+        return w.isVisible() and not w.visibleRegion().isEmpty()
+
     def tick(self, e):
-        """Called every GUI tick with the running engine (or None)."""
-        if e is None or not self.active():
+        """Called every GUI tick with the running engine (or None). Feeds the RTA and the spectrogram."""
+        rta_on, spec_on = self.active(), self._shown(self.spectro)
+        if e is None or not (rta_on or spec_on):
             if e is not None:
                 e.rta, e.tap = None, None
             return
         if e.rta is None:
             e.rta = ThirdOctaveBank(e.fs)
             self.rta.reset_peaks()
-        want_tap = self.spectro.isVisible()
+        want_tap = spec_on
         if want_tap and e.tap is None:
             e.tap = []
             self.spectro.setup(e.fs)
@@ -1297,12 +1491,33 @@ class RtaPanel(QtWidgets.QWidget):
         c = self.main.cfg
         ms = e.rta.levels(c["rta_speed"])
         lv = 10 * np.log10(np.maximum(ms, 1e-20)) + e.offset + weighting_db(c["rta_weight"], e.rta.fc)
-        self.rta.set_data(e.rta.labels, lv)
+        if rta_on:
+            self.rta.set_data(e.rta.labels, lv)
         if e.tap:
             blocks, e.tap[:] = list(e.tap), []
             top = float(np.nanmax(lv)) if len(lv) else 100
             self.spectro.top = 10 * math.ceil((top + 5) / 10)
             self.spectro.feed(blocks, e.offset)
+
+
+class SpectroPanel(QtWidgets.QWidget):
+    """Dock wrapper for the spectrogram (fed by RtaPanel.tick)."""
+
+    def __init__(self, spectro):
+        super().__init__()
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(6, 6, 6, 6)
+        row = QtWidgets.QHBoxLayout()
+        self.lbl = QtWidgets.QLabel("20 Hz at the bottom to 20 kHz at the top · brighter = louder")
+        self.lbl.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        row.addWidget(self.lbl, 1); row.addWidget(InfoTip(GLOSSARY["Spectrogram"]))
+        v.addLayout(row)
+        self.spectro = spectro
+        v.addWidget(spectro, 1)
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        self.lbl.setStyleSheet(f"color:{T['dim']}; font-size:8pt;")
 
 
 class DosePanel(QtWidgets.QWidget):
@@ -1316,7 +1531,7 @@ class DosePanel(QtWidgets.QWidget):
         rst = QtWidgets.QPushButton("Reset dose")
         rst.setToolTip("Start a new exposure period (e.g. a new shift or show)")
         rst.clicked.connect(self.reset)
-        top.addWidget(self.elapsed); top.addStretch(); top.addWidget(rst)
+        top.addWidget(self.elapsed); top.addWidget(InfoTip(GLOSSARY["Dose"])); top.addStretch(); top.addWidget(rst)
         v.addLayout(top)
         self.rows = []
         for d in make_dosimeters():
@@ -1331,10 +1546,14 @@ class DosePanel(QtWidgets.QWidget):
             info = QtWidgets.QLabel("")
             info.setWordWrap(True)
             status = QtWidgets.QLabel("")
-            g.addWidget(name, 0, 0); g.addWidget(status, 0, 1, QtCore.Qt.AlignRight)
+            nrow = QtWidgets.QHBoxLayout(); nrow.setSpacing(5)
+            nrow.addWidget(name); nrow.addWidget(InfoTip(GLOSSARY.get(d.name, ""))); nrow.addStretch()
+            irow = QtWidgets.QHBoxLayout(); irow.setSpacing(5)
+            irow.addWidget(info, 1); irow.addWidget(InfoTip(GLOSSARY["Dose line"]), 0, QtCore.Qt.AlignTop)
+            g.addLayout(nrow, 0, 0); g.addWidget(status, 0, 1, QtCore.Qt.AlignRight)
             g.addWidget(desc, 1, 0, 1, 2)
             g.addWidget(bar, 2, 0, 1, 2)
-            g.addWidget(info, 3, 0, 1, 2)
+            g.addLayout(irow, 3, 0, 1, 2)
             v.addWidget(box)
             self.rows.append((desc, bar, info, status))
         note = QtWidgets.QLabel("For guidance only. Use a certified Type 2 dosimeter for compliance records.")
@@ -1431,9 +1650,9 @@ class TheaterPanel(QtWidgets.QWidget):
         self.level.setToolTip("AES17 level: a full-scale sine reads 0 dBFS. Cinema standard is -20 dBFS.")
         f.addWidget(QtWidgets.QLabel("Output"), 0, 0); f.addWidget(self.out, 0, 1, 1, 3)
         f.addWidget(QtWidgets.QLabel("Format"), 1, 0); f.addWidget(self.layout_cb, 1, 1)
-        f.addWidget(QtWidgets.QLabel("Room"), 1, 2); f.addWidget(self.preset, 1, 3)
+        f.addWidget(QtWidgets.QLabel("Room"), 1, 2); f.addWidget(with_tip(self.preset, "Theater"), 1, 3)
         f.addWidget(QtWidgets.QLabel("Noise"), 2, 0); f.addWidget(self.noise, 2, 1)
-        f.addWidget(QtWidgets.QLabel("Level"), 2, 2); f.addWidget(self.level, 2, 3)
+        f.addWidget(QtWidgets.QLabel("Level"), 2, 2); f.addWidget(with_tip(self.level, "dBFS"), 2, 3)
         v.addLayout(f)
         self.big = QtWidgets.QLabel("--.- dBC")
         self.big.setAlignment(QtCore.Qt.AlignCenter)
@@ -3377,12 +3596,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.long = QtWidgets.QSpinBox(); self.long.setRange(1, 120); self.long.setValue(cfg["long_leq_min"]); self.long.setSuffix(" min")
         self.src = QtWidgets.QComboBox(); self.src.addItems(["Live meter", "LAeq 1 min"])
         self.src.setCurrentIndex(0 if cfg["thumb_src"] == "live" else 1)
-        f.addRow("Meter weighting", self.w)
-        f.addRow("Meter speed", self.t)
+        f.addRow("Meter weighting", with_tip(self.w, "Weighting"))
+        f.addRow("Meter speed", with_tip(self.t, "Speed"))
         f.addRow("Yellow warning starts", self.warn)
         f.addRow("Turn red / thumbs down at (dB)", self.alarm)
         f.addRow("Thumb / color follows", self.src)
-        f.addRow("Long Leq window", self.long)
+        f.addRow("Long Leq window", with_tip(self.long, "Long window"))
 
         # --- display
         f = page("Display")
@@ -3707,7 +3926,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prof_cb = QtWidgets.QComboBox(); self.prof_cb.setMinimumWidth(110)
         self.prof_cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.prof_cb.setMinimumContentsLength(10)
-        self.prof_cb.setToolTip("Mic profile (calibration)")
+        self.prof_cb.setToolTip(GLOSSARY["Mic profile"])
         self.prof_cb.activated.connect(lambda i: self.set_profile(self.prof_cb.itemText(i)))
         cal = QtWidgets.QPushButton("Calibrate…"); cal.clicked.connect(self.calibrate)
         rst = QtWidgets.QPushButton("Reset"); rst.setToolTip("Reset Leq / Max / Peak / Ln (not the dose or session)")
@@ -3727,6 +3946,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.red_at.setToolTip("Readings at or above this level turn red and show thumbs down")
         self.red_at.valueChanged.connect(self.set_red_at)
         tb.addWidget(lbl); tb.addWidget(self.red_at)
+        red_tip = InfoTip(GLOSSARY["Red at"]); red_tip.setContentsMargins(4, 0, 4, 0)
+        tb.addWidget(red_tip)
         tb.addSeparator()
         mini_btn = QtWidgets.QPushButton("Mini ⤡")
         mini_btn.setToolTip("Shrink to a small always-on-top box")
@@ -3755,12 +3976,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.meter)
         self.thumb = self.meter.thumb
         self.rta_panel = RtaPanel(self)
+        self.spectro_panel = SpectroPanel(self.rta_panel.spectro)
         self.dose_panel = DosePanel(self)
         self.theater = TheaterPanel(self)
         self.session_panel = SessionPanel(self)
         self.pco_panel = PcoPanel(self)
         self.docks = {}
-        for name, title, w, area in (("rta", "RTA · 1/3 octave + spectrogram", self.rta_panel, QtCore.Qt.RightDockWidgetArea),
+        for name, title, w, area in (("rta", "RTA · 1/3 octave", self.rta_panel, QtCore.Qt.RightDockWidgetArea),
+                                     ("spectro", "Spectrogram", self.spectro_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("dose", "Dosimeter · OSHA / NIOSH", self.dose_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("theater", "Theater calibration", self.theater, QtCore.Qt.RightDockWidgetArea),
                                      ("session", "Session · markers · alarms · export", self.session_panel,
@@ -3779,12 +4002,37 @@ class MainWindow(QtWidgets.QMainWindow):
                           | QtWidgets.QDockWidget.DockWidgetFloatable)
             self.addDockWidget(area, d)
             self.docks[name] = d
-        self.splitDockWidget(self.docks["rta"], self.docks["dose"], QtCore.Qt.Vertical)
+        self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Vertical)
+        self.splitDockWidget(self.docks["spectro"], self.docks["dose"], QtCore.Qt.Vertical)
         self.tabifyDockWidget(self.docks["dose"], self.docks["theater"])
         self.docks["dose"].raise_()
         self.splitDockWidget(self.docks["session"], self.docks["pco"], QtCore.Qt.Horizontal)
         if not self.cfg.get("dock_state"):
             QtCore.QTimer.singleShot(0, self.default_dock_sizes)
+
+        # second row: one button per tool (same as the View menu)
+        self.addToolBarBreak()
+        tools = QtWidgets.QToolBar("Tools"); tools.setObjectName("tools_bar"); tools.setMovable(False)
+        tools.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        self.addToolBar(tools)
+        self.tool_actions = {}
+        for name, short in (("rta", "RTA 1/3 oct"), ("spectro", "Spectrogram"), ("dose", "Dosimeter"),
+                            ("theater", "Theater cal"), ("session", "Session"), ("pco", "Planning Center")):
+            d = self.docks[name]
+            a = QtGui.QAction(short, self); a.setCheckable(True)
+            a.setToolTip(f"Show or hide the {d.windowTitle()} panel")
+            tva = d.toggleViewAction()
+            a.setChecked(tva.isChecked())
+            tva.toggled.connect(a.setChecked)
+            a.triggered.connect(lambda on, d=d: (d.show(), d.raise_()) if on else d.hide())
+            tools.addAction(a)
+            self.tool_actions[name] = a
+        tools.addSeparator()
+        tools.addAction("Show all", lambda: [d.show() for d in self.docks.values()])
+        tools.addAction("¼ screen", self.quarter_size).setToolTip("Shrink the window to a quarter of the screen")
+        tools.addAction("Fit", lambda: (self.resize(10_000, 10_000), self.fit_to_screen())).setToolTip(
+            "Fill the screen without going past its edges")
+        self.tools_bar = tools
 
         mb = self.menuBar()
         fm = mb.addMenu("&File")
@@ -3838,7 +4086,8 @@ class MainWindow(QtWidgets.QMainWindow):
         w, h = self.width(), self.height()
         self.resizeDocks([self.docks["rta"]], [int(w * 0.32)], QtCore.Qt.Horizontal)
         self.resizeDocks([self.docks["session"], self.docks["pco"]], [int(w * 0.62), int(w * 0.38)], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["rta"], self.docks["dose"]], [int(h * 0.5), int(h * 0.4)], QtCore.Qt.Vertical)
+        self.resizeDocks([self.docks["rta"], self.docks["spectro"], self.docks["dose"]],
+                         [int(h * 0.36), int(h * 0.24), int(h * 0.34)], QtCore.Qt.Vertical)
         self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
 
     def quarter_size(self):
@@ -4849,6 +5098,7 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setWindowIcon(app_icon())
+    install_combo_fixer(app)
     app.setQuitOnLastWindowClosed(False)    # mini meter / menu bar keep running while the window is hidden
     w = MainWindow()
     w.show()
