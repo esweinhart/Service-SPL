@@ -39,6 +39,7 @@ jobs:
           pyinstaller --noconfirm --windowed --name "ServiceSPL" \
             --osx-bundle-identifier com.servicespl.app \
             --collect-data _sounddevice_data \
+            --icon assets/ServiceSPL.icns \
             spl_monitor.py
           APP="dist/ServiceSPL.app"
           PL="$APP/Contents/Info.plist"
@@ -95,6 +96,7 @@ jobs:
             --target-arch universal2 \
             --osx-bundle-identifier com.servicespl.app \
             --collect-data _sounddevice_data \
+            --icon assets/ServiceSPL.icns \
             spl_monitor.py
           APP="dist/ServiceSPL.app"
           PL="$APP/Contents/Info.plist"
@@ -135,7 +137,7 @@ jobs:
           pip install numpy scipy PySide6 sounddevice pyinstaller
       - name: Build .exe
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name ServiceSPL --collect-data _sounddevice_data spl_monitor.py
+          pyinstaller --noconfirm --onefile --windowed --name ServiceSPL --icon assets/ServiceSPL.ico --collect-data _sounddevice_data spl_monitor.py
           Compress-Archive -Path dist\ServiceSPL.exe -DestinationPath ServiceSPL-Windows.zip
       - uses: actions/upload-artifact@v5
         with:
