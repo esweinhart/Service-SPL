@@ -112,8 +112,29 @@ def test_ln():
     ok("LA10 is above the background", recs[-1]["L10"] > l90 + 3, f"{recs[-1]['L10']:.1f}")
 
 
+def test_eq_and_osc():
+    fc = np.array([1000 * 10 ** (n / 10) for n in range(-17, 14)])
+    labels = sm.RTA_LABELS
+    meas = np.zeros(len(fc)); meas[labels.index("125")] = 5.0; meas[labels.index("63")] = -9.0
+    meas[labels.index("4k")] = -3.0
+    dev, tips = sm.eq_suggestions(fc, labels, meas + 80, np.zeros(len(fc)))
+    ok("EQ: suggests cutting a 125 Hz bump", any(t.startswith("Cut 125 Hz") for t in tips), str(tips))
+    ok("EQ: calls a deep 63 Hz dip a room null", any(t.startswith("63 Hz") and "null" in t for t in tips))
+    ok("EQ: small boost at 4k", any(t.startswith("Boost 4k") for t in tips))
+    m = sm.osc_message("/custom-variable/spl_level/value", "87.3")
+    ok("OSC message is 4-byte aligned", len(m) % 4 == 0 and m.startswith(b"/custom-variable/spl_level/value\0"))
+    m = sm.osc_message("/x", 1, 2, 3)
+    ok("OSC int args", m == b"/x\0\0,iii\0\0\0\0" + b"\0\0\0\x01\0\0\0\x02\0\0\0\x03", repr(m))
+    import datetime
+    e = dict(on=True, days=[0], start="09:00", stop="12:30")
+    ok("schedule: Monday 10:00 is inside", sm.schedule_window(e, datetime.datetime(2026, 11, 23, 10, 0)))
+    ok("schedule: Monday 12:30 is outside", not sm.schedule_window(e, datetime.datetime(2026, 11, 23, 12, 30)))
+    ok("schedule: Tuesday is outside", not sm.schedule_window(e, datetime.datetime(2026, 11, 24, 10, 0)))
+    ok("schedule: one-off date", sm.schedule_window(dict(e, date="2026-11-24"), datetime.datetime(2026, 11, 24, 10, 0)))
+
+
 if __name__ == "__main__":
-    for t in (test_true_peak, test_rta, test_cal_file, test_dose, test_pink, test_ln):
+    for t in (test_true_peak, test_rta, test_cal_file, test_dose, test_pink, test_ln, test_eq_and_osc):
         print(t.__name__)
         t()
     print("All engine checks passed.")

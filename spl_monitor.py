@@ -10,6 +10,7 @@ Optional on Mac: pyobjc-framework-Cocoa (live number in the menu bar)
 """
 
 import sys, os, re, json, time, csv, queue, math, datetime, socket, threading, base64, collections, array, copy
+import struct, subprocess, ctypes, urllib.request, urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 from scipy import signal
@@ -53,6 +54,10 @@ DEFAULTS = dict(
     theater=dict(layout="5.1", preset="Cinema / dub stage", noise="SMPTE band-limited (500 Hz - 2 kHz)",
                  level=-20.0, out_device=None, outputs={}, targets={}),
     session_view=600, venue="", operator="",
+    companion_on=False, companion_host="127.0.0.1", companion_port=12321, companion_button="",
+    ndi_name="SPL Monitor", ndi_size="1280x720", ndi_transparent=False, ndi_lib="",
+    autosave_dir="", autosave_reports=True, schedule=[],
+    pco_app_id="", pco_target=95.0, pco_service_type=None,
     win_geom=None, dock_state=None,
 )
 
@@ -296,6 +301,7 @@ class Engine:
         self.ln_step = max(1, fs // self.LN_RATE)
         self.samples = 0
         self.rta = None          # ThirdOctaveBank when the RTA panel is visible
+        self.extra = []          # more banks (room EQ measurements)
         self.tap = None          # list of corrected blocks for the spectrogram
         self.dose = make_dosimeters()
         self.cal_target = 0
@@ -341,6 +347,8 @@ class Engine:
             del self.tap[:-400]
         if self.rta is not None:
             self.rta.process(x)
+        for b in self.extra:
+            b.process(x)
         blk_a = 0.0
         for k in "ACZ":
             if self.sos[k] is None:
@@ -586,6 +594,7 @@ def style_sheet():
     return f"""
 QWidget {{ background:{T['bg']}; color:{T['fg']}; font-family:'Segoe UI','Helvetica Neue',Arial; font-size:10pt; }}
 QFrame#tile {{ background:{T['panel']}; border:1px solid {T['border']}; border-radius:6px; }}
+QFrame#tile QLabel {{ background:transparent; }}
 QPushButton, QToolButton {{ background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:4px; padding:5px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background:{T['hover']}; }}
 QPushButton:checked {{ background:{T['checked']}; border-color:{T['green']}; }}
@@ -974,6 +983,7 @@ class Session:
         self.laf = array.array("f")
         self.markers = []     # (time, text)
         self.events = []      # (time, text)
+        self.items = []       # (start time, title): Planning Center / manual service items
         self.cal_info = ""
 
     def __len__(self):
@@ -1625,11 +1635,13 @@ class SessionPanel(QtWidgets.QWidget):
         self.view.currentTextChanged.connect(self._view)
         mk = QtWidgets.QPushButton("◆ Marker"); mk.setToolTip("Drop a marker (shortcut M)")
         mk.clicked.connect(lambda: main.add_marker())
-        new = QtWidgets.QPushButton("New session"); new.clicked.connect(main.new_session)
-        ecsv = QtWidgets.QPushButton("Export CSV…"); ecsv.clicked.connect(main.export_csv)
-        epdf = QtWidgets.QPushButton("PDF report…"); epdf.clicked.connect(main.export_pdf)
+        new = QtWidgets.QPushButton("New session"); new.clicked.connect(lambda: main.new_session())
+        ecsv = QtWidgets.QPushButton("Export CSV…"); ecsv.clicked.connect(lambda: main.export_csv())
+        epdf = QtWidgets.QPushButton("PDF report…"); epdf.clicked.connect(lambda: main.export_pdf())
+        sch = QtWidgets.QPushButton("Schedule…"); sch.setToolTip("Start and stop logging by time (e.g. every Sunday)")
+        sch.clicked.connect(lambda: main.edit_schedule())
         top.addWidget(self.info, 1)
-        for w in (self.view, mk, new, ecsv, epdf):
+        for w in (self.view, mk, new, ecsv, epdf, sch):
             top.addWidget(w)
         v.addLayout(top)
         meta = QtWidgets.QHBoxLayout()
@@ -2297,6 +2309,867 @@ class MenuBarMeter:
             self.tray = None
 
 
+# -------------------------------------------------------- integrations ----
+
+def osc_message(addr, *args):
+    """Encode one OSC 1.0 message (int / float / string arguments)."""
+    def pad(b):
+        return b + b"\0" * (4 - len(b) % 4)
+    tags, payload = ",", b""
+    for a in args:
+        if isinstance(a, bool):
+            a = int(a)
+        if isinstance(a, int):
+            tags += "i"; payload += struct.pack(">i", a)
+        elif isinstance(a, float):
+            tags += "f"; payload += struct.pack(">f", a)
+        else:
+            tags += "s"; payload += pad(str(a).encode("utf-8"))
+    return pad(addr.encode()) + pad(tags.encode()) + payload
+
+
+class CompanionLink:
+    """Pushes the live level to Bitfocus Companion over OSC (UDP, default port 12321):
+    custom variables spl_level, spl_leq1m, spl_leqlong, spl_peak, spl_dose, spl_state, spl_color, spl_item
+    and, optionally, the text + background colour of one button."""
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.last = 0.0
+        self.error = ""
+
+    def send(self, cfg, d):
+        now = time.time()
+        if now - self.last < 0.25:
+            return
+        self.last = now
+        host, port = cfg["companion_host"] or "127.0.0.1", int(cfg["companion_port"])
+        msgs = [osc_message(f"/custom-variable/spl_{k}/value", str(v)) for k, v in (
+            ("level", d["level"]), ("leq1m", d["leq1m"]), ("leqlong", d["leqlong"]), ("peak", d["peak"]),
+            ("dose", d["dose"]), ("state", d["state"]), ("color", d["color"]), ("item", d.get("item", "")))]
+        loc = (cfg.get("companion_button") or "").strip()
+        if re.fullmatch(r"\d+/\d+/\d+", loc):
+            q = QtGui.QColor(d["color"])
+            msgs.append(osc_message(f"/location/{loc}/style/text", f"{d['level']}\n{d['label']}"))
+            msgs.append(osc_message(f"/location/{loc}/style/bgcolor", q.red(), q.green(), q.blue()))
+            msgs.append(osc_message(f"/location/{loc}/style/color", 255, 255, 255))
+        try:
+            for m in msgs:
+                self.sock.sendto(m, (host, port))
+            self.error = ""
+        except OSError as e:
+            self.error = str(e)
+
+
+def secret_get(account):
+    """Read a secret from the macOS Keychain (or the config fallback elsewhere)."""
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-s", "SPL Monitor", "-a", account, "-w"],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+    return ""
+
+
+def secret_set(account, value):
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(["security", "add-generic-password", "-U", "-s", "SPL Monitor", "-a", account, "-w", value],
+                           capture_output=True, timeout=5)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+class PcoClient:
+    """Planning Center Services API (personal access token: application id + secret)."""
+    BASE = "https://api.planningcenteronline.com/services/v2"
+
+    def __init__(self, app_id, secret):
+        self.auth = "Basic " + base64.b64encode(f"{app_id}:{secret}".encode()).decode()
+
+    def get(self, path, **params):
+        url = self.BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
+        req = urllib.request.Request(url, headers={"Authorization": self.auth, "Accept": "application/json",
+                                                   "User-Agent": f"SPL-Monitor/{APP_VERSION}"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.load(r)
+
+    def service_types(self):
+        d = self.get("/service_types", per_page=100)
+        return [(x["id"], x["attributes"].get("name") or x["id"]) for x in d.get("data", [])]
+
+    def plans(self, st):
+        out = []
+        for flt, order, n in (("past", "-sort_date", 2), ("future", "sort_date", 6)):
+            d = self.get(f"/service_types/{st}/plans", filter=flt, order=order, per_page=n)
+            for x in d.get("data", []):
+                a = x["attributes"]
+                label = " · ".join(s for s in (a.get("dates") or a.get("short_dates") or "", a.get("title") or "",
+                                               a.get("series_title") or "") if s)
+                out.append((x["id"], label or x["id"], a.get("sort_date") or ""))
+        out.sort(key=lambda p: p[2])
+        return out
+
+    def live_item(self, st, plan):
+        """Current Live item: (item_id, title) or (None, None) when Live isn't running."""
+        d = self.get(f"/service_types/{st}/plans/{plan}/live", include="current_item_time,items")
+        rel = (d.get("data") or {}).get("relationships", {}).get("current_item_time", {}).get("data")
+        if not rel:
+            return None, None
+        inc = {(x["type"], x["id"]): x for x in d.get("included", [])}
+        it = inc.get(("ItemTime", rel["id"]))
+        item_ref = (it or {}).get("relationships", {}).get("item", {}).get("data") if it else None
+        if not item_ref:
+            return rel["id"], "Live item"
+        item = inc.get(("Item", item_ref["id"]))
+        title = item["attributes"].get("title") if item else None
+        if not title:
+            try:
+                title = self.get(f"/service_types/{st}/plans/{plan}/items/{item_ref['id']}")["data"]["attributes"]["title"]
+            except Exception:
+                title = "Live item"
+        return item_ref["id"], title
+
+
+class PcoFollower:
+    """Background poller for Services Live. The GUI reads .current and .error."""
+    def __init__(self):
+        self.client = None
+        self.st = self.plan = None
+        self.current = (None, None)
+        self.error = ""
+        self.on = False
+        self._stop = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def follow(self, client, st, plan):
+        self.client, self.st, self.plan = client, st, plan
+        self.current = (None, None)
+        self.on = True
+
+    def stop(self):
+        self.on = False
+        self.current = (None, None)
+
+    def _run(self):
+        while not self._stop.wait(3.0):
+            if not (self.on and self.client):
+                continue
+            try:
+                self.current = self.client.live_item(self.st, self.plan)
+                self.error = ""
+            except Exception as e:
+                self.error = str(e)
+
+
+def item_stats(sess, t0, t1):
+    t = sess.col("time")
+    if not len(t):
+        return None
+    i0, i1 = np.searchsorted(t, t0), np.searchsorted(t, t1)
+    if i1 <= i0:
+        return None
+    return dict(LAeq=energy_mean(sess.col("LAeq1s")[i0:i1]), LCeq=energy_mean(sess.col("LCeq1s")[i0:i1]),
+                LAFmax=float(np.nanmax(sess.col("LAFmax1s")[i0:i1])),
+                LCpeak=float(np.nanmax(sess.col("LCpeak1s")[i0:i1])), dur=i1 - i0)
+
+
+def find_onedrive():
+    """Best guess at the user's synced OneDrive folder."""
+    cands = []
+    if sys.platform == "darwin":
+        import glob
+        cands += sorted(glob.glob(os.path.expanduser("~/Library/CloudStorage/OneDrive*")))
+    for k in ("OneDriveCommercial", "OneDriveConsumer", "OneDrive"):
+        if os.environ.get(k):
+            cands.append(os.environ[k])
+    cands.append(os.path.expanduser("~/OneDrive"))
+    return next((c for c in cands if os.path.isdir(c)), "")
+
+
+# ----------------------------------------------------------------- NDI ----
+
+class NDIlib_send_create_t(ctypes.Structure):
+    _fields_ = [("p_ndi_name", ctypes.c_char_p), ("p_groups", ctypes.c_char_p),
+                ("clock_video", ctypes.c_bool), ("clock_audio", ctypes.c_bool)]
+
+
+class NDIlib_video_frame_v2_t(ctypes.Structure):
+    _fields_ = [("xres", ctypes.c_int), ("yres", ctypes.c_int), ("FourCC", ctypes.c_int),
+                ("frame_rate_N", ctypes.c_int), ("frame_rate_D", ctypes.c_int),
+                ("picture_aspect_ratio", ctypes.c_float), ("frame_format_type", ctypes.c_int),
+                ("timecode", ctypes.c_int64), ("p_data", ctypes.c_void_p),
+                ("line_stride_in_bytes", ctypes.c_int), ("p_metadata", ctypes.c_char_p),
+                ("timestamp", ctypes.c_int64)]
+
+
+def ndi_library_candidates(custom=""):
+    c = [custom] if custom else []
+    for v in ("NDI_RUNTIME_DIR_V6", "NDI_RUNTIME_DIR_V5", "NDI_RUNTIME_DIR_V4"):
+        d = os.environ.get(v)
+        if d:
+            c += [os.path.join(d, n) for n in ("libndi.dylib", "Processing.NDI.Lib.x64.dll", "libndi.so")]
+    if sys.platform == "darwin":
+        c += ["/usr/local/lib/libndi.dylib", "/opt/homebrew/lib/libndi.dylib",
+              "/Library/NDI SDK for Apple/lib/macOS/libndi.dylib",
+              "/Library/NDI Advanced SDK for Apple/lib/macOS/libndi_advanced.dylib",
+              "/Applications/NDI Video Monitor.app/Contents/Frameworks/libndi.dylib",
+              "/Applications/NDI Tools/NDI Video Monitor.app/Contents/Frameworks/libndi.dylib",
+              "/Applications/NDI Scan Converter.app/Contents/Frameworks/libndi.dylib"]
+    elif sys.platform.startswith("win"):
+        for v in ("6", "5"):
+            c.append(rf"C:\Program Files\NDI\NDI {v} Runtime\v{v}\Processing.NDI.Lib.x64.dll")
+            c.append(rf"C:\Program Files\NDI\NDI {v} Tools\Runtime\Processing.NDI.Lib.x64.dll")
+        c.append("Processing.NDI.Lib.x64.dll")
+    else:
+        c += ["libndi.so.6", "libndi.so.5", "libndi.so"]
+    return c
+
+
+class NdiSender:
+    """Sends rendered meter frames as an NDI source, using the installed NDI runtime (no Python package)."""
+    FOURCC_BGRA = ord("B") | ord("G") << 8 | ord("R") << 16 | ord("A") << 24
+
+    def __init__(self, name, custom_lib=""):
+        self.lib = None
+        err = []
+        for path in ndi_library_candidates(custom_lib):
+            if os.path.isabs(path) and not os.path.exists(path):
+                continue
+            try:
+                self.lib = ctypes.CDLL(path)
+                self.path = path
+                break
+            except OSError as e:
+                err.append(f"{path}: {e}")
+        if self.lib is None:
+            raise RuntimeError("NDI runtime not found. Install the free NDI Tools (ndi.video/tools) "
+                               "or point Settings → Integrations → NDI library at libndi.")
+        L = self.lib
+        L.NDIlib_initialize.restype = ctypes.c_bool
+        L.NDIlib_send_create.restype = ctypes.c_void_p
+        L.NDIlib_send_create.argtypes = [ctypes.POINTER(NDIlib_send_create_t)]
+        L.NDIlib_send_send_video_v2.argtypes = [ctypes.c_void_p, ctypes.POINTER(NDIlib_video_frame_v2_t)]
+        L.NDIlib_send_destroy.argtypes = [ctypes.c_void_p]
+        if not L.NDIlib_initialize():
+            raise RuntimeError("NDI could not start on this computer (CPU not supported?).")
+        self._name = name.encode()
+        cs = NDIlib_send_create_t(self._name, None, False, False)
+        self.inst = L.NDIlib_send_create(ctypes.byref(cs))
+        if not self.inst:
+            raise RuntimeError("Could not create the NDI sender.")
+
+    def send(self, img, fps=30):
+        img = img.convertToFormat(QtGui.QImage.Format_ARGB32)   # BGRA in memory on little-endian CPUs
+        w, h = img.width(), img.height()
+        ptr = img.constBits()
+        buf = (ctypes.c_char * img.sizeInBytes()).from_buffer_copy(bytes(ptr))
+        fr = NDIlib_video_frame_v2_t(w, h, self.FOURCC_BGRA, fps * 1000, 1000, w / h, 1, 2 ** 63 - 1,
+                                     ctypes.cast(buf, ctypes.c_void_p), img.bytesPerLine(), None, 0)
+        self.lib.NDIlib_send_send_video_v2(self.inst, ctypes.byref(fr))
+
+    def close(self):
+        if self.lib and getattr(self, "inst", None):
+            self.lib.NDIlib_send_destroy(self.inst)
+            self.inst = None
+
+
+_THUMB_RENDER = {}
+
+
+def paint_meter_card(p, r, d, transparent=False):
+    """The 'just the SPL meter' graphic used for NDI: thumb, big number, label line and a level bar."""
+    r = QtCore.QRectF(r)
+    p.save()
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
+    p.fillRect(r, QtGui.QColor(0, 0, 0, 0) if transparent else QtGui.QColor("#121417"))
+    p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+    if transparent:
+        p.setBrush(QtGui.QColor(18, 20, 23, 200)); p.setPen(QtCore.Qt.NoPen)
+        p.drawRoundedRect(r.adjusted(r.width() * 0.03, r.height() * 0.08, -r.width() * 0.03, -r.height() * 0.08),
+                          r.height() * 0.06, r.height() * 0.06)
+    H = r.height()
+    pad = H * 0.12
+    ts = H * 0.5
+    st = d.get("state", "off")
+    if st not in _THUMB_RENDER:
+        bg, xf = {"good": ("#2ea866", ""), "bad": ("#e03b3b", "rotate(180 50 50)")}.get(st, ("#8a9099", ""))
+        _THUMB_RENDER[st] = QtSvg.QSvgRenderer(QtCore.QByteArray(THUMB_SVG.format(bg=bg, xf=xf).encode()))
+    _THUMB_RENDER[st].render(p, QtCore.QRectF(r.left() + pad, r.top() + (H - ts) / 2 - H * 0.05, ts, ts))
+    f = QtGui.QFont("Menlo"); f.setStyleHint(QtGui.QFont.Monospace); f.setBold(True); f.setPixelSize(int(H * 0.42))
+    p.setFont(f); p.setPen(QtGui.QColor(d.get("color", "#e8e8e8")))
+    num = QtCore.QRectF(r.left() + pad + ts, r.top() + H * 0.12, r.width() - 2 * pad - ts, H * 0.5)
+    p.drawText(num, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, d.get("level", "--.-"))
+    f2 = QtGui.QFont("Helvetica"); f2.setPixelSize(int(H * 0.06)); p.setFont(f2)
+    p.setPen(QtGui.QColor("#c9ced6"))
+    sub_r = QtCore.QRectF(num.left(), num.bottom(), num.width(), H * 0.1)
+    sub = QtGui.QFontMetrics(f2).elidedText(d.get("sub", ""), QtCore.Qt.ElideRight, int(sub_r.width()))
+    p.drawText(sub_r, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, sub)
+    br = QtCore.QRectF(num.left(), r.top() + H * 0.76, num.width(), H * 0.06)
+    p.setPen(QtCore.Qt.NoPen); p.setBrush(QtGui.QColor("#0c0d0f")); p.drawRoundedRect(br, 4, 4)
+    try:
+        lv = float(d.get("level"))
+    except (TypeError, ValueError):
+        lv = 30.0
+    frac = min(max((lv - 40) / 80, 0), 1)
+    p.setBrush(QtGui.QColor(d.get("color", "#3ddc84")))
+    p.drawRoundedRect(QtCore.QRectF(br.left(), br.top(), br.width() * frac, br.height()), 4, 4)
+    p.restore()
+
+
+# ---------------------------------------------------- schedule + guide ----
+
+DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def schedule_window(entry, now):
+    """True when 'now' falls inside this schedule entry."""
+    if not entry.get("on", True):
+        return False
+    try:
+        h0, m0 = map(int, entry["start"].split(":"))
+        h1, m1 = map(int, entry["stop"].split(":"))
+    except (KeyError, ValueError):
+        return False
+    if entry.get("date"):
+        if now.strftime("%Y-%m-%d") != entry["date"]:
+            return False
+    elif now.weekday() not in entry.get("days", []):
+        return False
+    a, b, x = h0 * 60 + m0, h1 * 60 + m1, now.hour * 60 + now.minute
+    return a <= x < b if a < b else False
+
+
+class ScheduleDialog(QtWidgets.QDialog):
+    """Edit recurring (weekly) or one-off logging windows."""
+    def __init__(self, cfg, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Logging schedule")
+        self.setMinimumWidth(720)
+        self.cfg = cfg
+        v = QtWidgets.QVBoxLayout(self)
+        v.addWidget(QtWidgets.QLabel("Logging starts and stops by itself inside these windows. The meter starts "
+                                     "automatically if it isn't running. Leave Date empty for every week."))
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["On", "Days", "Date (one-off)", "Start", "Stop", "New session + report"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        v.addWidget(self.table)
+        b = QtWidgets.QHBoxLayout()
+        add = QtWidgets.QPushButton("+ Add window"); add.clicked.connect(lambda: self.add_row({}))
+        rem = QtWidgets.QPushButton("− Remove"); rem.clicked.connect(lambda: self.table.removeRow(self.table.currentRow()))
+        b.addWidget(add); b.addWidget(rem); b.addStretch()
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
+        b.addWidget(bb)
+        v.addLayout(b)
+        for e in cfg["schedule"]:
+            self.add_row(e)
+
+    def add_row(self, e):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        on = QtWidgets.QCheckBox(); on.setChecked(e.get("on", True))
+        self.table.setCellWidget(r, 0, on)
+        days = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(days); h.setContentsMargins(2, 0, 2, 0); h.setSpacing(2)
+        sel = e.get("days", [6])
+        for i, dname in enumerate(DAYS):
+            cb = QtWidgets.QCheckBox(dname[:2]); cb.setChecked(i in sel); h.addWidget(cb)
+        self.table.setCellWidget(r, 1, days)
+        date = QtWidgets.QLineEdit(e.get("date", "")); date.setPlaceholderText("YYYY-MM-DD")
+        self.table.setCellWidget(r, 2, date)
+        for c, key, dflt in ((3, "start", "09:00"), (4, "stop", "12:30")):
+            te = QtWidgets.QTimeEdit(QtCore.QTime.fromString(e.get(key, dflt), "HH:mm")); te.setDisplayFormat("HH:mm")
+            self.table.setCellWidget(r, c, te)
+        rep = QtWidgets.QCheckBox(); rep.setChecked(e.get("report", True))
+        self.table.setCellWidget(r, 5, rep)
+        self.table.resizeRowsToContents()
+
+    def apply(self):
+        out = []
+        for r in range(self.table.rowCount()):
+            days = [i for i, cb in enumerate(self.table.cellWidget(r, 1).findChildren(QtWidgets.QCheckBox)) if cb.isChecked()]
+            out.append(dict(on=self.table.cellWidget(r, 0).isChecked(), days=days,
+                            date=self.table.cellWidget(r, 2).text().strip(),
+                            start=self.table.cellWidget(r, 3).time().toString("HH:mm"),
+                            stop=self.table.cellWidget(r, 4).time().toString("HH:mm"),
+                            report=self.table.cellWidget(r, 5).isChecked()))
+        self.cfg["schedule"] = out
+
+
+EQ_TARGETS = {
+    "Flat": lambda f: np.zeros_like(f),
+    "Live / worship house curve": lambda f: 6 * np.clip((np.log10(200) - np.log10(f)) / (np.log10(200) - np.log10(40)), 0, 1)
+                                        - np.where(f > 1000, np.log2(np.maximum(f, 1000) / 1000), 0),
+    "Cinema X-curve (SMPTE ST 202)": lambda f: -3 * np.log2(np.maximum(f, 2000) / 2000),
+    "X-curve, small room (from 4 kHz)": lambda f: -1.5 * np.log2(np.maximum(f, 4000) / 4000),
+    "Hi-fi / studio (gentle tilt)": lambda f: 4 * np.clip((np.log10(120) - np.log10(f)) / (np.log10(120) - np.log10(30)), 0, 1)
+                                          - 0.5 * np.log2(f / 1000),
+}
+
+
+def eq_suggestions(fc, labels, measured, target, lo_hz=40, hi_hz=16000, tol=2.0, max_boost=3.0):
+    """Compare a measured 1/3-octave response with a target curve (aligned on 250 Hz - 4 kHz)
+    and return (normalized deviation, [suggestion strings])."""
+    fc = np.asarray(fc)
+    ref = (fc >= 250) & (fc <= 4000)
+    dev = measured - target
+    dev = dev - np.mean(dev[ref]) if ref.any() else dev
+    tips = []
+    for f, lab, dv in zip(fc, labels, dev):
+        if f < lo_hz or f > hi_hz or abs(dv) < tol:
+            continue
+        if dv > 0:
+            tips.append(f"Cut {lab} Hz by {dv:.1f} dB (bell, Q ≈ 4.3)")
+        elif dv < -6:
+            tips.append(f"{lab} Hz is {-dv:.1f} dB low: likely a room null. Move the speaker or sub, don't boost it")
+        else:
+            tips.append(f"Boost {lab} Hz by {min(-dv, max_boost):.1f} dB (bell, Q ≈ 4.3)"
+                        + (" (capped, boosts eat headroom)" if -dv > max_boost else ""))
+    return dev, tips
+
+
+class EqPlot(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self.fc, self.dev, self.target = [], None, None
+        self.setMinimumHeight(170)
+
+    def set_data(self, fc, labels, dev):
+        self.fc, self.labels, self.dev = list(fc), labels, dev
+        self.update()
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        r = QtCore.QRectF(self.rect().adjusted(34, 6, -6, -18))
+        p.fillRect(r, QtGui.QColor(T["track"]))
+        f = p.font(); f.setPointSize(8); p.setFont(f)
+        y = lambda v: r.center().y() - max(min(v, 12), -12) / 12 * r.height() / 2
+        for v in (-12, -6, -2, 0, 2, 6, 12):
+            p.setPen(QtGui.QPen(QtGui.QColor(T["dim"] if v == 0 else T["grid"]), 1,
+                                QtCore.Qt.SolidLine if v in (0, 6, -6, 12, -12) else QtCore.Qt.DotLine))
+            p.drawLine(QtCore.QPointF(r.left(), y(v)), QtCore.QPointF(r.right(), y(v)))
+            p.setPen(QtGui.QColor(T["dim"]))
+            p.drawText(QtCore.QRectF(0, y(v) - 7, 30, 14), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f"{v:+d}")
+        if self.dev is None:
+            p.drawText(r, QtCore.Qt.AlignCenter, "Measure to see how the room compares with the target")
+            return
+        n = len(self.dev)
+        bw = r.width() / n
+        for i, dv in enumerate(self.dev):
+            col = T["green"] if abs(dv) < 2 else T["yellow"] if abs(dv) < 4 else T["red"]
+            x0 = r.left() + i * bw
+            p.fillRect(QtCore.QRectF(x0 + 1, min(y(0), y(dv)), bw - 2, abs(y(dv) - y(0))), QtGui.QColor(col))
+            if i % 3 == 2:
+                p.setPen(QtGui.QColor(T["dim"]))
+                p.drawText(QtCore.QRectF(x0 - 12, r.bottom() + 2, bw + 24, 14), QtCore.Qt.AlignCenter, self.labels[i])
+        p.setPen(QtGui.QColor(T["dim"]))
+        p.drawText(r.adjusted(6, 2, 0, 0), QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
+                   "dB above (+) / below (−) the target curve · green within ±2 dB")
+
+
+GUIDE_PAGES = [
+    ("Welcome", """<h2>Welcome to SPL Monitor</h2>
+<p>This guide walks you through setting up and using the meter. Pick a topic on the left, or press <b>Next</b>.</p>
+<ol><li><b>Pick your mic</b> in the toolbar input menu (a UMIK or other USB measurement mic is picked automatically).</li>
+<li>Press <b>▶ Start</b>. The big number is the live level; the strip under it is the last few minutes.</li>
+<li><b>Calibrate</b> once per mic (next page), so the numbers are real dB SPL.</li>
+<li>Set <b>Red at</b> to your house limit. Everything turns yellow 5 dB before that and red at it.</li></ol>
+<p>Panels around the meter (RTA, dosimeter, theater cal, session, Planning Center) can be dragged, stacked, floated or
+hidden from the <b>View</b> menu. The layout is remembered.</p>"""),
+    ("Calibrate your mic", """<h2>Calibrate your mic</h2>
+<p>Each mic gets a <b>profile</b>. Run <b>Calibrate…</b> and pick one of three ways:</p>
+<ul><li><b>Acoustic calibrator</b> (best): put a 94 or 114 dB calibrator on the mic, wait for “steady”, press Measure.</li>
+<li><b>Cal file</b>: load the UMIK-1/UMIK-2 file from miniDSP (enter your serial number on their site). This fixes the
+frequency response and, with the Mac's input volume for the mic at 100 %, sets the level from the Sens Factor.
+Use the <b>90°</b> file when the mic points at the ceiling.</li>
+<li><b>Manual</b>: type the mic's mV/Pa and your interface gain, or an offset you already know.</li></ul>
+<p>Tick “pick automatically” and the profile follows that mic whenever you select it. The status bar shows which profile
+is active and warns when a calibration is over 30 days old.</p>"""),
+    ("Monitoring a show", """<h2>Monitoring a service or show</h2>
+<ul><li><b>LAeq 1 min / 15 min</b> are the averages most venue limits use (e.g. 100 dB LAeq 15 min).</li>
+<li><b>LCeq</b> shows the bass energy; LC − LA above ~15 dB means the mix is very bass heavy.</li>
+<li><b>LA10</b> is the loud moments, <b>LA90</b> the background (room noise, HVAC).</li>
+<li><b>LCpeak</b> is the highest instantaneous peak. Keep it under 135 dB for audiences, never above 140.</li></ul>
+<p>Alarms (Session panel) fire once when a value crosses its threshold: a red banner, a beep and an entry in the log.
+Press <b>M</b> (or ◆ Marker) to drop markers like “sermon” or “band in”.</p>"""),
+    ("Hearing dose", """<h2>Hearing dose (OSHA / NIOSH)</h2>
+<p>The dosimeter adds up exposure since its last reset. 100 % is the daily limit:</p>
+<ul><li><b>NIOSH</b>: 85 dBA for 8 h, every +3 dB halves the time (88 dBA = 4 h, 100 dBA = 15 min).</li>
+<li><b>OSHA HC</b>: 90 dBA for 8 h with a 5 dB exchange; 50 % is the action level for hearing protection programs.</li>
+<li><b>OSHA PEL</b>: the legal limit (ignores anything under 90 dBA).</li></ul>
+<p>Reset the dose at the start of a shift or call time. It survives Stop/Start. Guidance only, not a certified dosimeter.</p>"""),
+    ("Theater calibration", """<h2>Theater / room level calibration</h2>
+<ol><li>Open the <b>Theater calibration</b> panel and pick your interface as the Output, the format (5.1, 7.1, 7.1.4…) and
+the room preset (cinema: 85 dBC screen, 82 dBC surrounds).</li>
+<li>Check the <b>Out</b> column matches your patch (L R C LFE Ls Rs is the SMPTE order).</li>
+<li>Put the mic at the main listening position, pointing at the ceiling (90° cal file).</li>
+<li>Press <b>▶ Play</b>, adjust the amp/processor until it says <b>on target ✓</b>, then <b>Next ▶</b>.
+Or press <b>Auto run</b> to measure every channel in one go and fix the red ones afterwards.</li></ol>
+<p>Noise is -20 dBFS RMS (AES17) band-limited 500 Hz – 2 kHz, the SMPTE/Dolby standard. LFE is always band-limited to
+20 – 120 Hz; its target is a starting point, confirm it on the RTA (about +10 dB in-band over the screen channels).</p>"""),
+    ("Room EQ", "__EQ__"),
+    ("Logging & reports", """<h2>Logging, schedules and reports</h2>
+<ul><li><b>● Log</b> writes a CSV every 1 s / 10 s / 1 min with Leq, max, peak, LA10/90, dose, markers and the current
+Planning Center item.</li>
+<li><b>Schedule…</b> (Session panel) starts and stops logging by itself, e.g. every Sunday 08:30 – 12:30.</li>
+<li><b>Auto-save folder</b> (Settings → Logging): point it at your OneDrive folder. Logs, the session CSV and the PDF
+report are saved there in dated folders (YYYY / YYYY-MM-DD - plan) and OneDrive syncs them.</li>
+<li><b>PDF report</b>: summary, time history, markers, alarms and per-item levels for the service.</li></ul>"""),
+    ("Companion, NDI & web", """<h2>Stream Deck (Companion), NDI and web view</h2>
+<ul><li><b>Companion</b>: enable it in Settings → Integrations. SPL Monitor sends OSC to Companion (port 12321) and sets
+custom variables <code>spl_level</code>, <code>spl_leq1m</code>, <code>spl_leqlong</code>, <code>spl_peak</code>,
+<code>spl_dose</code>, <code>spl_state</code>, <code>spl_color</code>, <code>spl_item</code>. Create those custom variables
+in Companion, then use <code>$(custom:spl_level)</code> on a button. Or give a button location (page/row/column) and
+SPL Monitor paints that button's text and color directly.</li>
+<li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “SPL Monitor” for your
+switcher. Needs the free NDI Tools/runtime installed. Tick “transparent background” for a key-able overlay.</li>
+<li><b>Web view</b>: shows the big number in any browser on the network; <code>/api/json</code> and <code>/api/level</code>
+give the numbers to other software.</li></ul>"""),
+    ("Planning Center", """<h2>Planning Center Services Live</h2>
+<ol><li>Create a Personal Access Token at <b>api.planningcenteronline.com/oauth/applications</b> (Personal Access
+Tokens → New). Copy the Application ID and Secret into the Planning Center panel and press Connect.</li>
+<li>Pick the service type and today's plan, then tick <b>Follow Live</b>.</li>
+<li>When someone advances Services Live, the current item shows in the panel, stamps every log row, and becomes an event.
+The panel and the PDF report show LAeq / LCeq / max / peak for every item, flagged red when an item's LAeq goes over
+the item target.</li></ol>
+<p>On a Mac the secret is kept in your Keychain.</p>"""),
+]
+
+
+class GuideWizard(QtWidgets.QDialog):
+    """Built-in step-by-step help, with an interactive room EQ page driven by the live RTA."""
+    def __init__(self, main, start="Welcome"):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle("SPL Monitor guide")
+        self.resize(940, 640)
+        h = QtWidgets.QHBoxLayout(self)
+        self.nav = QtWidgets.QListWidget()
+        self.nav.setFixedWidth(190)
+        self.nav.addItems([t for t, _ in GUIDE_PAGES])
+        h.addWidget(self.nav)
+        right = QtWidgets.QVBoxLayout()
+        self.stack = QtWidgets.QStackedWidget()
+        for title, html in GUIDE_PAGES:
+            if html == "__EQ__":
+                self.stack.addWidget(self._eq_page())
+            else:
+                tb = QtWidgets.QTextBrowser(); tb.setOpenExternalLinks(True); tb.setHtml(html)
+                tb.setStyleSheet("font-size:11pt;")
+                self.stack.addWidget(tb)
+        right.addWidget(self.stack, 1)
+        b = QtWidgets.QHBoxLayout()
+        self.action = QtWidgets.QPushButton(""); self.action.clicked.connect(self.do_action)
+        prev = QtWidgets.QPushButton("◀ Back"); prev.clicked.connect(lambda: self.nav.setCurrentRow(max(0, self.nav.currentRow() - 1)))
+        nxt = QtWidgets.QPushButton("Next ▶"); nxt.clicked.connect(lambda: self.nav.setCurrentRow(min(self.nav.count() - 1, self.nav.currentRow() + 1)))
+        close = QtWidgets.QPushButton("Close"); close.clicked.connect(self.accept)
+        b.addWidget(self.action); b.addStretch(); b.addWidget(prev); b.addWidget(nxt); b.addWidget(close)
+        right.addLayout(b)
+        h.addLayout(right, 1)
+        self.nav.currentRowChanged.connect(self._page)
+        self.nav.setCurrentRow(max(0, [t for t, _ in GUIDE_PAGES].index(start) if start in [t for t, _ in GUIDE_PAGES] else 0))
+        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self.poll); self.timer.start(200)
+        self.capture = None
+        self.positions = []
+
+    ACTIONS = {"Welcome": "▶ Start the meter", "Calibrate your mic": "Open the calibration wizard…",
+               "Monitoring a show": "Show the Session panel", "Hearing dose": "Show the dosimeter",
+               "Theater calibration": "Show the theater panel", "Logging & reports": "Edit the schedule…",
+               "Companion, NDI & web": "Open Settings…", "Planning Center": "Show the Planning Center panel"}
+
+    def _page(self, i):
+        self.stack.setCurrentIndex(i)
+        title = GUIDE_PAGES[i][0]
+        self.action.setText(self.ACTIONS.get(title, ""))
+        self.action.setVisible(title in self.ACTIONS)
+
+    def do_action(self):
+        t = GUIDE_PAGES[self.nav.currentRow()][0]
+        m = self.main
+        if t == "Welcome" and not m.running():
+            m.run_btn.click()
+        elif t == "Calibrate your mic":
+            m.calibrate()
+        elif t in ("Monitoring a show", "Hearing dose", "Theater calibration", "Planning Center"):
+            key = {"Monitoring a show": "session", "Hearing dose": "dose", "Theater calibration": "theater",
+                   "Planning Center": "pco"}[t]
+            m.docks[key].show(); m.docks[key].raise_()
+        elif t == "Logging & reports":
+            m.edit_schedule()
+        elif t == "Companion, NDI & web":
+            m.settings()
+
+    def _eq_page(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        intro = QtWidgets.QLabel(
+            "<h2>Room EQ with the RTA</h2>"
+            "<ol><li>Pick the output/channel for the speaker you're tuning and press <b>Play pink noise</b> "
+            "(full-band, -20 dBFS). Bring it up to a comfortable 80–85 dBC.</li>"
+            "<li>Put the mic where people listen. Press <b>Measure position</b> (10 s average). Measure 3–5 seats "
+            "and the app averages them, which stops you EQing one seat's quirks.</li>"
+            "<li>Make the suggested cuts on your processor/console EQ, then <b>Clear</b> and measure again. "
+            "Prefer cuts; big dips are usually room nulls that EQ can't fix.</li></ol>")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+        row = QtWidgets.QHBoxLayout()
+        self.eq_out = QtWidgets.QComboBox()
+        th = self.main.theater
+        for i in range(th.out.count()):
+            self.eq_out.addItem(th.out.itemText(i), th.out.itemData(i))
+        self.eq_out.setCurrentIndex(th.out.currentIndex())
+        self.eq_ch = QtWidgets.QSpinBox(); self.eq_ch.setRange(1, 64); self.eq_ch.setPrefix("Out ")
+        self.eq_target = QtWidgets.QComboBox(); self.eq_target.addItems(list(EQ_TARGETS))
+        self.eq_target.currentTextChanged.connect(self.recompute)
+        self.eq_play = QtWidgets.QPushButton("▶ Play pink noise"); self.eq_play.setCheckable(True)
+        self.eq_play.clicked.connect(self.toggle_noise)
+        row.addWidget(self.eq_out, 2); row.addWidget(self.eq_ch); row.addWidget(QtWidgets.QLabel("Target"))
+        row.addWidget(self.eq_target, 2); row.addWidget(self.eq_play)
+        v.addLayout(row)
+        row2 = QtWidgets.QHBoxLayout()
+        self.eq_meas = QtWidgets.QPushButton("Measure position (10 s)"); self.eq_meas.clicked.connect(self.measure)
+        clr = QtWidgets.QPushButton("Clear"); clr.clicked.connect(self.clear)
+        self.eq_status = QtWidgets.QLabel("No measurements yet")
+        self.eq_prog = QtWidgets.QProgressBar(); self.eq_prog.setRange(0, 100); self.eq_prog.setValue(0)
+        row2.addWidget(self.eq_meas); row2.addWidget(clr); row2.addWidget(self.eq_prog, 1); row2.addWidget(self.eq_status)
+        v.addLayout(row2)
+        self.eq_plot = EqPlot()
+        v.addWidget(self.eq_plot, 1)
+        self.eq_tips = QtWidgets.QListWidget()
+        self.eq_tips.setMaximumHeight(130)
+        v.addWidget(self.eq_tips)
+        self.eq_player = NoisePlayer()
+        self.eq_bank = None
+        return w
+
+    def toggle_noise(self, on):
+        m = self.main
+        if on:
+            if not m.running():
+                m.run_btn.click()
+            try:
+                fs = self.eq_player.open(self.eq_out.currentData(), self.eq_ch.value() - 1)
+            except Exception as ex:
+                self.eq_play.setChecked(False)
+                QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not open the output:\n{ex}")
+                return
+            self.eq_player.set_buffer(make_pink(fs, 20, min(20000, fs * 0.45), -20.0, seed=7))
+            self.eq_player.ch = self.eq_ch.value() - 1
+            if m.sim is not None and self.eq_out.currentData() is None:
+                m.sim.inject = self.eq_player
+            self.eq_play.setText("■ Stop noise")
+        else:
+            self.eq_player.stop()
+            if m.sim is not None and m.sim.inject is self.eq_player:
+                m.sim.inject = None
+            self.eq_play.setText("▶ Play pink noise")
+
+    def measure(self):
+        e = self.main.engine
+        if e is None or not self.main.running():
+            self.eq_status.setText("Press Start first")
+            return
+        self.eq_bank = ThirdOctaveBank(e.fs)
+        e.extra.append(self.eq_bank)
+        self.capture = time.time()
+        self.eq_meas.setEnabled(False)
+
+    def clear(self):
+        self.positions = []
+        self.eq_plot.set_data([], [], None)
+        self.eq_tips.clear()
+        self.eq_status.setText("Cleared")
+
+    def poll(self):
+        e = self.main.engine
+        if self.capture is None or e is None:
+            return
+        el = time.time() - self.capture
+        self.eq_prog.setValue(int(min(el / 10, 1) * 100))
+        if el >= 10:
+            self.capture = None
+            if self.eq_bank in e.extra:
+                e.extra.remove(self.eq_bank)
+            self.eq_meas.setEnabled(True)
+            lv = 10 * np.log10(np.maximum(self.eq_bank.levels("Leq"), 1e-20)) + e.offset
+            self.positions.append(lv)
+            self.eq_status.setText(f"{len(self.positions)} position(s) averaged")
+            self.recompute()
+
+    def recompute(self, *_):
+        if not self.positions or self.eq_bank is None:
+            return
+        avg = 10 * np.log10(np.mean([10 ** (p / 10) for p in self.positions], axis=0))
+        fc = np.array(self.eq_bank.fc)
+        tgt = EQ_TARGETS[self.eq_target.currentText()](fc)
+        dev, tips = eq_suggestions(fc, self.eq_bank.labels, avg, tgt)
+        self.eq_plot.set_data(fc, self.eq_bank.labels, dev)
+        self.eq_tips.clear()
+        self.eq_tips.addItems(tips or ["Within ±2 dB of the target everywhere. Nice room! 🎉"])
+
+    def done(self, r):
+        self.timer.stop()
+        self.toggle_noise(False)
+        super().done(r)
+
+
+class PcoPanel(QtWidgets.QWidget):
+    """Planning Center Services Live: follow the current item, per-item levels."""
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        c = main.cfg
+        self.client = None
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(6, 6, 6, 6)
+        g = QtWidgets.QGridLayout()
+        self.app_id = QtWidgets.QLineEdit(c["pco_app_id"]); self.app_id.setPlaceholderText("Application ID")
+        self.secret = QtWidgets.QLineEdit(); self.secret.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.secret.setPlaceholderText("Secret")
+        self.secret.setText(secret_get("pco") or c.get("pco_secret", ""))
+        con = QtWidgets.QPushButton("Connect"); con.clicked.connect(self.connect_pco)
+        self.st = QtWidgets.QComboBox(); self.plan = QtWidgets.QComboBox()
+        self.st.currentIndexChanged.connect(self.load_plans)
+        self.follow = QtWidgets.QCheckBox("Follow Live"); self.follow.toggled.connect(self.toggle_follow)
+        self.target = QtWidgets.QDoubleSpinBox(); self.target.setRange(60, 130); self.target.setValue(c["pco_target"])
+        self.target.setPrefix("Item target LAeq "); self.target.setSuffix(" dB")
+        self.target.valueChanged.connect(lambda x: c.__setitem__("pco_target", x))
+        g.addWidget(self.app_id, 0, 0); g.addWidget(self.secret, 0, 1); g.addWidget(con, 0, 2)
+        g.addWidget(self.st, 1, 0); g.addWidget(self.plan, 1, 1); g.addWidget(self.follow, 1, 2)
+        g.addWidget(self.target, 2, 0, 1, 2)
+        v.addLayout(g)
+        self.status = QtWidgets.QLabel("Not connected")
+        self.now = QtWidgets.QLabel("—")
+        self.now.setWordWrap(True)
+        v.addWidget(self.status); v.addWidget(self.now)
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Item", "Start", "Time", "LAeq", "LCeq", "LCpeak"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        v.addWidget(self.table, 1)
+        self.manual = QtWidgets.QPushButton("Start item manually…")
+        self.manual.setToolTip("No Planning Center? Name the current segment yourself")
+        self.manual.clicked.connect(self.manual_item)
+        v.addWidget(self.manual)
+        self.follower = PcoFollower()
+        self.last_id = None
+        self.flagged = set()
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        self.status.setStyleSheet(f"color:{T['dim']};")
+        self.now.setStyleSheet("font-size:15pt; font-weight:700;")
+
+    def connect_pco(self):
+        a, s = self.app_id.text().strip(), self.secret.text().strip()
+        if not (a and s):
+            self.status.setText("Enter the Application ID and Secret of a Personal Access Token")
+            return
+        self.main.cfg["pco_app_id"] = a
+        if not secret_set("pco", s):
+            self.main.cfg["pco_secret"] = s
+        self.main.save_cfg()
+        self.client = PcoClient(a, s)
+        try:
+            sts = self.client.service_types()
+        except Exception as e:
+            self.status.setText(f"Couldn't connect: {e}")
+            return
+        self.st.blockSignals(True); self.st.clear()
+        for i, n in sts:
+            self.st.addItem(n, i)
+        want = self.st.findData(self.main.cfg.get("pco_service_type"))
+        self.st.setCurrentIndex(want if want >= 0 else 0)
+        self.st.blockSignals(False)
+        self.status.setText(f"Connected · {len(sts)} service types")
+        self.load_plans()
+
+    def load_plans(self):
+        if not self.client or self.st.currentData() is None:
+            return
+        self.main.cfg["pco_service_type"] = self.st.currentData()
+        try:
+            plans = self.client.plans(self.st.currentData())
+        except Exception as e:
+            self.status.setText(f"Couldn't load plans: {e}")
+            return
+        self.plan.clear()
+        today = datetime.date.today().isoformat()
+        pick = 0
+        for i, (pid, label, sd_) in enumerate(plans):
+            self.plan.addItem(label, pid)
+            if sd_[:10] <= today:
+                pick = i
+            if sd_[:10] == today:
+                pick = i
+        self.plan.setCurrentIndex(pick)
+
+    def toggle_follow(self, on):
+        if on and self.client and self.plan.currentData():
+            self.follower.follow(self.client, self.st.currentData(), self.plan.currentData())
+            self.main.pco_plan_label = self.plan.currentText()
+            self.status.setText(f"Following Live: {self.plan.currentText()}")
+        else:
+            self.follower.stop()
+            if on:
+                self.follow.setChecked(False)
+                self.status.setText("Connect and pick a plan first")
+
+    def manual_item(self):
+        txt, ok = QtWidgets.QInputDialog.getText(self, "Current item", "Item name (e.g. Worship set, Sermon):")
+        if ok and txt.strip():
+            self.main.set_item(txt.strip())
+
+    def tick(self):
+        f = self.follower
+        if f.on:
+            iid, title = f.current
+            if f.error:
+                self.status.setText(f"Planning Center: {f.error}")
+            if iid and iid != self.last_id:
+                self.last_id = iid
+                self.main.set_item(title)
+        self.refresh_table()
+
+    def refresh_table(self):
+        s = self.main.session
+        items = s.items
+        if not items:
+            self.now.setText("No item yet")
+            return
+        self.table.setRowCount(len(items))
+        end = time.time()
+        tgt = self.main.cfg["pco_target"]
+        for i, (t0, title) in enumerate(items):
+            t1 = items[i + 1][0] if i + 1 < len(items) else end
+            st = item_stats(s, t0, t1)
+            vals = [title, f"{datetime.datetime.fromtimestamp(t0):%H:%M}", hms(t1 - t0)]
+            vals += [fmt(st[k]).strip() if st else "--.-" for k in ("LAeq", "LCeq", "LCpeak")]
+            over = st is not None and np.isfinite(st["LAeq"]) and st["LAeq"] >= tgt
+            for c, txt in enumerate(vals):
+                it = self.table.item(i, c)
+                if it is None:
+                    it = QtWidgets.QTableWidgetItem(); self.table.setItem(i, c, it)
+                it.setText(txt)
+                it.setForeground(QtGui.QColor(T["red"] if over and c == 3 else T["fg"]))
+            if over and i not in self.flagged and st["dur"] > 30:
+                self.flagged.add(i)
+                self.main.raise_alarm(f"'{title}' running LAeq {st['LAeq']:.1f} ≥ item target {tgt:.0f}")
+        t0, title = items[-1]
+        st = item_stats(s, t0, end)
+        lv = st["LAeq"] if st else float("nan")
+        col = T["red"] if np.isfinite(lv) and lv >= tgt else T["fg"]
+        self.now.setText(f"Now: {title}   <span style='color:{col}; font-family:Menlo,monospace'>"
+                         f"LAeq {fmt(lv).strip()}</span>")
+
+
 # ---------------------------------------------------------- web view -----
 
 WEB_PAGE = """<!DOCTYPE html>
@@ -2335,18 +3208,24 @@ class WebView:
     """Tiny read-only HTTP server: '/' = big-number page, '/data' = live JSON."""
     def __init__(self, port):
         self.state = {"value": None, "color": "#e8e8e8", "state": "off", "sub": "stopped"}
+        self.api = {}
         page = WEB_PAGE.replace("__SVG__", json.dumps(THUMB_SVG)).encode()
         view = self
 
         class H(BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path.startswith("/data"):
+                if self.path.startswith("/api/json"):
+                    body, ctype = json.dumps(view.api).encode(), "application/json"
+                elif self.path.startswith("/api/level"):
+                    body, ctype = str(view.api.get("level", "--.-")).encode(), "text/plain; charset=utf-8"
+                elif self.path.startswith("/data"):
                     body, ctype = json.dumps(view.state).encode(), "application/json"
                 else:
                     body, ctype = page, "text/html; charset=utf-8"
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -2387,7 +3266,16 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        f = QtWidgets.QFormLayout(self)
+        self.setMinimumWidth(560)
+        outer = QtWidgets.QVBoxLayout(self)
+        tabs = QtWidgets.QTabWidget()
+        outer.addWidget(tabs)
+
+        def page(name):
+            w = QtWidgets.QWidget(); f = QtWidgets.QFormLayout(w); tabs.addTab(w, name); return f
+
+        # --- meter
+        f = page("Meter")
         self.w = QtWidgets.QComboBox(); self.w.addItems(["A", "C", "Z"]); self.w.setCurrentText(cfg["main_weight"])
         self.t = QtWidgets.QComboBox(); self.t.addItems(["Fast", "Slow"])
         self.t.setCurrentText("Fast" if cfg["main_time"] == "F" else "Slow")
@@ -2395,43 +3283,98 @@ class SettingsDialog(QtWidgets.QDialog):
         self.warn.setSuffix(" dB below red"); self.warn.setSpecialValueText("off")
         self.alarm = QtWidgets.QDoubleSpinBox(); self.alarm.setRange(40, 140); self.alarm.setValue(cfg["alarm"])
         self.long = QtWidgets.QSpinBox(); self.long.setRange(1, 120); self.long.setValue(cfg["long_leq_min"]); self.long.setSuffix(" min")
-        self.li = QtWidgets.QComboBox(); self.li.addItems(list(LOG_INTERVALS))
-        self.li.setCurrentText(next(k for k, v in LOG_INTERVALS.items() if v == cfg["log_interval"]))
-        self.logdir = QtWidgets.QLineEdit(cfg["log_dir"])
-        browse = QtWidgets.QPushButton("Browse…"); browse.clicked.connect(self._browse)
-        row = QtWidgets.QHBoxLayout(); row.addWidget(self.logdir); row.addWidget(browse)
+        self.src = QtWidgets.QComboBox(); self.src.addItems(["Live meter", "LAeq 1 min"])
+        self.src.setCurrentIndex(0 if cfg["thumb_src"] == "live" else 1)
+        f.addRow("Meter weighting", self.w)
+        f.addRow("Meter speed", self.t)
+        f.addRow("Yellow warning starts", self.warn)
+        f.addRow("Turn red / thumbs down at (dB)", self.alarm)
+        f.addRow("Thumb / color follows", self.src)
+        f.addRow("Long Leq window", self.long)
+
+        # --- display
+        f = page("Display")
         self.theme = QtWidgets.QComboBox(); self.theme.addItems(["Follow system", "Dark", "Light"])
         self.theme.setCurrentIndex({"auto": 0, "dark": 1, "light": 2}[cfg["theme"]])
         self.style = QtWidgets.QComboBox(); self.style.addItems(["Big number + history", "Big number + bar"])
         self.style.setCurrentIndex(0 if cfg["meter_style"] == "history" else 1)
         self.hist = QtWidgets.QSpinBox(); self.hist.setRange(1, 30); self.hist.setSuffix(" min")
         self.hist.setValue(max(1, cfg["history_secs"] // 60))
-        self.menubar = QtWidgets.QCheckBox("Show the live level in the menu bar")
+        self.menubar = QtWidgets.QCheckBox("Show the live level in the menu bar (● 87.3)")
         self.menubar.setChecked(cfg["menubar"])
         f.addRow("Theme", self.theme)
         f.addRow("Meter style", self.style)
         f.addRow("History length", self.hist)
         f.addRow("", self.menubar)
-        f.addRow("Meter weighting", self.w)
-        f.addRow("Meter speed", self.t)
-        f.addRow("Yellow warning starts", self.warn)
-        f.addRow("Turn red / thumbs down at (dB)", self.alarm)
-        self.src = QtWidgets.QComboBox(); self.src.addItems(["Live meter", "LAeq 1 min"])
-        self.src.setCurrentIndex(0 if cfg["thumb_src"] == "live" else 1)
-        f.addRow("Thumb / color follows", self.src)
-        f.addRow("Long Leq window", self.long)
+
+        # --- logging
+        f = page("Logging && reports")
+        self.li = QtWidgets.QComboBox(); self.li.addItems(list(LOG_INTERVALS))
+        self.li.setCurrentText(next(k for k, v in LOG_INTERVALS.items() if v == cfg["log_interval"]))
+        self.logdir = QtWidgets.QLineEdit(cfg["log_dir"])
+        row = QtWidgets.QHBoxLayout(); row.addWidget(self.logdir)
+        b = QtWidgets.QPushButton("Browse…"); b.clicked.connect(lambda: self._browse(self.logdir)); row.addWidget(b)
+        self.auto = QtWidgets.QLineEdit(cfg["autosave_dir"])
+        self.auto.setPlaceholderText("off (e.g. your OneDrive folder)")
+        row2 = QtWidgets.QHBoxLayout(); row2.addWidget(self.auto)
+        b2 = QtWidgets.QPushButton("Browse…"); b2.clicked.connect(lambda: self._browse(self.auto)); row2.addWidget(b2)
+        od = QtWidgets.QPushButton("Find OneDrive"); od.clicked.connect(self._onedrive); row2.addWidget(od)
+        self.auto_rep = QtWidgets.QCheckBox("Save the PDF report + session CSV automatically when logging stops")
+        self.auto_rep.setChecked(cfg["autosave_reports"])
         f.addRow("Log interval", self.li)
         f.addRow("Log folder", row)
+        f.addRow("Auto-save folder", row2)
+        f.addRow("", self.auto_rep)
+        f.addRow("", QtWidgets.QLabel("With an auto-save folder, logs and reports go to\n"
+                                      "<folder>/SPL Monitor/YYYY/YYYY-MM-DD[ - plan]/ instead of the log folder."))
+
+        # --- integrations
+        f = page("Integrations")
+        self.comp = QtWidgets.QCheckBox("Send levels to Bitfocus Companion (OSC)")
+        self.comp.setChecked(cfg["companion_on"])
+        self.ch = QtWidgets.QLineEdit(cfg["companion_host"])
+        self.cp = QtWidgets.QSpinBox(); self.cp.setRange(1, 65535); self.cp.setValue(int(cfg["companion_port"]))
+        self.cb = QtWidgets.QLineEdit(cfg["companion_button"]); self.cb.setPlaceholderText("optional page/row/column, e.g. 1/0/0")
+        f.addRow(self.comp)
+        f.addRow("Companion computer", self.ch)
+        f.addRow("Companion OSC port", self.cp)
+        f.addRow("Paint this button", self.cb)
         self.port = QtWidgets.QSpinBox(); self.port.setRange(1024, 65535); self.port.setValue(cfg["web_port"])
-        f.addRow("Web view port", self.port)
+        f.addRow("Web view / API port", self.port)
+        self.ndi_name = QtWidgets.QLineEdit(cfg["ndi_name"])
+        self.ndi_size = QtWidgets.QComboBox(); self.ndi_size.addItems(["1280x720", "1920x1080", "960x540", "1280x360"])
+        self.ndi_size.setCurrentText(cfg["ndi_size"])
+        self.ndi_tr = QtWidgets.QCheckBox("Transparent background (for keying over video)")
+        self.ndi_tr.setChecked(cfg["ndi_transparent"])
+        self.ndi_lib = QtWidgets.QLineEdit(cfg["ndi_lib"]); self.ndi_lib.setPlaceholderText("auto-detect")
+        row3 = QtWidgets.QHBoxLayout(); row3.addWidget(self.ndi_lib)
+        b3 = QtWidgets.QPushButton("Browse…"); b3.clicked.connect(self._ndi_lib); row3.addWidget(b3)
+        f.addRow("NDI source name", self.ndi_name)
+        f.addRow("NDI size", self.ndi_size)
+        f.addRow("", self.ndi_tr)
+        f.addRow("NDI library", row3)
+
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
-        f.addRow(bb)
+        outer.addWidget(bb)
 
-    def _browse(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Log folder", self.logdir.text())
+    def _browse(self, edit):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose folder", edit.text() or os.path.expanduser("~"))
         if d:
-            self.logdir.setText(d)
+            edit.setText(d)
+
+    def _onedrive(self):
+        d = find_onedrive()
+        if d:
+            self.auto.setText(d)
+        else:
+            QtWidgets.QMessageBox.information(self, APP_NAME, "Couldn't find a OneDrive folder. Install OneDrive, "
+                                              "sign in, then press Browse and pick it (Finder → OneDrive).")
+
+    def _ndi_lib(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "NDI library", "/", "NDI runtime (libndi*.dylib *.dll *.so*)")
+        if path:
+            self.ndi_lib.setText(path)
 
     def apply(self, cfg):
         cfg.update(main_weight=self.w.currentText(), main_time=self.t.currentText()[0],
@@ -2440,12 +3383,17 @@ class SettingsDialog(QtWidgets.QDialog):
                    thumb_src="live" if self.src.currentIndex() == 0 else "leq1m",
                    web_port=self.port.value(), theme=["auto", "dark", "light"][self.theme.currentIndex()],
                    meter_style="history" if self.style.currentIndex() == 0 else "bar",
-                   history_secs=self.hist.value() * 60, menubar=self.menubar.isChecked())
+                   history_secs=self.hist.value() * 60, menubar=self.menubar.isChecked(),
+                   autosave_dir=self.auto.text().strip(), autosave_reports=self.auto_rep.isChecked(),
+                   companion_on=self.comp.isChecked(), companion_host=self.ch.text().strip() or "127.0.0.1",
+                   companion_port=self.cp.value(), companion_button=self.cb.text().strip(),
+                   ndi_name=self.ndi_name.text().strip() or "SPL Monitor", ndi_size=self.ndi_size.currentText(),
+                   ndi_transparent=self.ndi_tr.isChecked(), ndi_lib=self.ndi_lib.text().strip())
 
 
 # ---------------------------------------------------------- PDF report ----
 
-def write_pdf_report(path, sess, cfg, profile_name, prof):
+def write_pdf_report(path, sess, cfg, profile_name, prof, plan_label=""):
     """One-page (plus overflow) session report: summary, graph, markers and events."""
     saved = dict(T)
     T.update(PALETTES["light"])        # reports are always printed light
@@ -2469,8 +3417,8 @@ def write_pdf_report(path, sess, cfg, profile_name, prof):
             return fm.height() * 1.25
 
         y += text("SPL Session Report", 20, True)
-        y += text(f"{cfg.get('venue') or 'Untitled session'}" + (f"  ·  {cfg['operator']}" if cfg.get("operator") else ""),
-                  12, color="#5f6670")
+        y += text(" · ".join(x for x in (cfg.get("venue") or ("" if plan_label else "Untitled session"), plan_label,
+                                          cfg.get("operator") or "") if x), 12, color="#5f6670")
         t = sess.col("time")
         start = datetime.datetime.fromtimestamp(t[0] if len(t) else sess.start)
         end = datetime.datetime.fromtimestamp(t[-1] if len(t) else time.time())
@@ -2502,6 +3450,29 @@ def write_pdf_report(path, sess, cfg, profile_name, prof):
         paint_session_graph(p, QtCore.QRectF(0, y, W, gh), sess, 0, cfg["alarm"], cfg["alarm"] - cfg["warn_gap"],
                             small_font=7)
         y += gh + 14
+        if sess.items:
+            y += text("Service items", 12, True)
+            cx = [0, W * 0.42, W * 0.52, W * 0.62, W * 0.72, W * 0.82, W * 0.91]
+            hdr = ["Item", "Start", "Time", "LAeq", "LCeq", "LAFmax", "LCpeak"]
+            f = QtGui.QFont("Helvetica", 8); f.setBold(True); p.setFont(f); p.setPen(QtGui.QColor("#5f6670"))
+            for x0, h in zip(cx, hdr):
+                p.drawText(QtCore.QRectF(x0, y, W * 0.4, 24), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, h)
+            y += 26
+            tend = t[-1] + 1 if len(t) else time.time()
+            for i, (t0, title) in enumerate(sess.items):
+                if y > H - 30:
+                    w.newPage(); y = 0
+                t1 = sess.items[i + 1][0] if i + 1 < len(sess.items) else tend
+                st = item_stats(sess, t0, t1)
+                vals = [title[:48], f"{datetime.datetime.fromtimestamp(t0):%H:%M}", hms(t1 - t0)]
+                vals += [fmt(st[k]).strip() if st else "--.-" for k in ("LAeq", "LCeq", "LAFmax", "LCpeak")]
+                over = st is not None and np.isfinite(st["LAeq"]) and st["LAeq"] >= cfg.get("pco_target", 999)
+                f = QtGui.QFont("Helvetica", 9); p.setFont(f)
+                for j, (x0, v) in enumerate(zip(cx, vals)):
+                    p.setPen(QtGui.QColor("#dc3030" if over and j == 3 else "#1b1e23"))
+                    p.drawText(QtCore.QRectF(x0, y, W * 0.4, 24), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, v)
+                y += 24
+            y += 10
         rows = [(mt, "◆ " + txt) for mt, txt in sess.markers] + [(et, "· " + txt) for et, txt in sess.events]
         rows.sort()
         y += text("Markers and events", 12, True)
@@ -2547,6 +3518,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mini = None
         self.web = None
         self.menubar_meter = None
+        self.companion = CompanionLink()
+        self.ndi = None
+        self.card = {"level": "--.-", "color": "#8a9099", "state": "off", "sub": "stopped"}
+        self.current_item = ""
+        self.pco_plan_label = ""
+        self.sched_key = None
+        self.sched_skip = set()
+        self._sched_stopping = False
+        self._last_sec = 0
         self._build_ui()
         self.populate_devices()
         self.restore_layout()
@@ -2554,6 +3534,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(50)
+        self.ndi_timer = QtCore.QTimer(self)
+        self.ndi_timer.timeout.connect(self.send_ndi)
         try:
             QtGui.QGuiApplication.styleHints().colorSchemeChanged.connect(lambda *_: self.on_theme_change())
         except Exception:
@@ -2607,7 +3589,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for t in self.meter.tiles():
             t.refresh_theme()
         self.meter.apply_style()
-        for w in (self.dose_panel, self.theater, self.mini):
+        for w in (self.dose_panel, self.theater, self.mini, self.pco_panel):
             if w is not None:
                 w.refresh_theme()
         self.apply_cfg_to_ui()
@@ -2656,8 +3638,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.web_btn.setToolTip("Show the meter in a browser on another computer (e.g. the Proton)")
         self.web_btn.clicked.connect(self.toggle_web)
         tb.addWidget(self.web_btn)
+        self.ndi_btn = QtWidgets.QPushButton("NDI")
+        self.ndi_btn.setCheckable(True)
+        self.ndi_btn.setToolTip("Send just the meter graphic as an NDI source for your video switcher")
+        self.ndi_btn.clicked.connect(self.toggle_ndi)
+        tb.addWidget(self.ndi_btn)
         st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
         tb.addWidget(st)
+        gd = QtWidgets.QPushButton("? Guide"); gd.setToolTip("Step-by-step guide and room EQ helper")
+        gd.clicked.connect(lambda: self.guide())
+        tb.addWidget(gd)
         self.cal_lbl = QtWidgets.QLabel()
         self.status = self.statusBar()
         self.status.addPermanentWidget(self.cal_lbl)
@@ -2669,11 +3659,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dose_panel = DosePanel(self)
         self.theater = TheaterPanel(self)
         self.session_panel = SessionPanel(self)
+        self.pco_panel = PcoPanel(self)
         self.docks = {}
         for name, title, w, area in (("rta", "RTA · 1/3 octave + spectrogram", self.rta_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("dose", "Dosimeter · OSHA / NIOSH", self.dose_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("theater", "Theater calibration", self.theater, QtCore.Qt.RightDockWidgetArea),
                                      ("session", "Session · markers · alarms · export", self.session_panel,
+                                      QtCore.Qt.BottomDockWidgetArea),
+                                     ("pco", "Service · Planning Center Live", self.pco_panel,
                                       QtCore.Qt.BottomDockWidgetArea)):
             d = QtWidgets.QDockWidget(title, self)
             d.setObjectName("dock_" + name)
@@ -2685,12 +3678,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.splitDockWidget(self.docks["rta"], self.docks["dose"], QtCore.Qt.Vertical)
         self.tabifyDockWidget(self.docks["dose"], self.docks["theater"])
         self.docks["dose"].raise_()
+        self.splitDockWidget(self.docks["session"], self.docks["pco"], QtCore.Qt.Horizontal)
+        self.resizeDocks([self.docks["session"], self.docks["pco"]], [900, 450], QtCore.Qt.Horizontal)
 
         mb = self.menuBar()
         fm = mb.addMenu("&File")
-        fm.addAction("Export session CSV…", self.export_csv)
-        fm.addAction("Export PDF report…", self.export_pdf)
-        fm.addAction("New session", self.new_session)
+        fm.addAction("Export session CSV…", lambda: self.export_csv())
+        fm.addAction("Export PDF report…", lambda: self.export_pdf())
+        fm.addAction("New session", lambda: self.new_session())
         fm.addSeparator()
         fm.addAction("Settings…", self.settings)
         vm = mb.addMenu("&View")
@@ -2706,6 +3701,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tm.addAction("Marker with note…", self.add_marker_note, QtGui.QKeySequence("Shift+M"))
         tm.addAction("Reset Leq / Max / Peak", self.reset_stats)
         tm.addAction("Reset dose", self.dose_panel.reset)
+        tm.addAction("Logging schedule…", self.edit_schedule)
+        tm.addAction("Start service item…", self.pco_panel.manual_item)
+        hm = mb.addMenu("&Help")
+        hm.addAction("Guide…", lambda: self.guide())
+        hm.addAction("Room EQ helper…", lambda: self.guide("Room EQ"))
+        hm.addAction("Theater calibration help", lambda: self.guide("Theater calibration"))
         self.refresh_profiles()
         self.apply_cfg_to_ui()
 
@@ -2950,8 +3951,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if ok:
             self.add_marker(txt.strip() or None)
 
-    def new_session(self):
-        if len(self.session) > 60:
+    def new_session(self, confirm=True):
+        if confirm and len(self.session) > 60:
             r = QtWidgets.QMessageBox.question(self, APP_NAME, "Start a new session? The current history is cleared "
                                                "(export it first if you need it).")
             if r != QtWidgets.QMessageBox.Yes:
@@ -2960,18 +3961,50 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session.cal_info = self.active_profile().get("cal_info", "")
         self.session_panel.events.clear()
         self.alarm_armed = {}
+        self.pco_panel.flagged = set()
+        self.pco_panel.table.setRowCount(0)
+        if self.current_item:
+            self.session.items.append((time.time(), self.current_item))
         self.session_panel.graph.update()
 
-    def export_csv(self):
+    def guide(self, page="Welcome"):
+        GuideWizard(self, page).exec()
+
+    def edit_schedule(self):
+        d = ScheduleDialog(self.cfg, self)
+        if d.exec():
+            d.apply()
+            self.save_cfg()
+
+    def set_item(self, title):
+        """Start a new service item (from Planning Center Live or by hand)."""
+        self.current_item = title
+        self.session.items.append((time.time(), title))
+        self.add_event(f"Item: {title}")
+
+    def out_dir(self):
+        """Where logs and reports go: the dated auto-save (OneDrive) folder, or the plain log folder."""
+        base = self.cfg["autosave_dir"]
+        if not base:
+            return self.cfg["log_dir"]
+        day = datetime.datetime.fromtimestamp(self.session.start)
+        name = day.strftime("%Y-%m-%d")
+        if self.pco_plan_label:
+            name += " - " + re.sub(r'[\\/:*?"<>|]+', "-", self.pco_plan_label)[:60].strip()
+        return os.path.join(base, "SPL Monitor", day.strftime("%Y"), name)
+
+    def export_csv(self, path=None):
         if not len(self.session):
-            QtWidgets.QMessageBox.information(self, APP_NAME, "Nothing recorded yet: press Start first.")
+            if path is None:
+                QtWidgets.QMessageBox.information(self, APP_NAME, "Nothing recorded yet: press Start first.")
             return
-        os.makedirs(self.cfg["log_dir"], exist_ok=True)
-        default = os.path.join(self.cfg["log_dir"], datetime.datetime.fromtimestamp(self.session.start)
-                               .strftime("Session_%Y-%m-%d_%H%M.csv"))
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export session CSV", default, "CSV (*.csv)")
-        if not path:
-            return
+        os.makedirs(self.out_dir(), exist_ok=True)
+        if path is None:
+            default = os.path.join(self.out_dir(), datetime.datetime.fromtimestamp(self.session.start)
+                                   .strftime("Session_%Y-%m-%d_%H%M.csv"))
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export session CSV", default, "CSV (*.csv)")
+            if not path:
+                return
         s = self.session
         notes = collections.defaultdict(list)
         for t, txt in s.markers:
@@ -2979,60 +4012,84 @@ class MainWindow(QtWidgets.QMainWindow):
         for t, txt in s.events:
             notes[int(t)].append(txt)
         keys = sorted(notes)
+        it_t = [t for t, _ in s.items]
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
             w.writerow(["Timestamp", "LAeq 1s", "LCeq 1s", "LZeq 1s", "LAFmax", "LCpeak", "LAS", "LAeq 1 min",
                         f"LAeq {self.cfg['long_leq_min']} min", f"LCeq {self.cfg['long_leq_min']} min",
-                        "LA10 1s", "LA90 1s", "Dose OSHA HC %", "Dose NIOSH %", "Markers / events", "Calibration"])
+                        "LA10 1s", "LA90 1s", "Dose OSHA HC %", "Dose NIOSH %", "Item", "Markers / events",
+                        "Calibration"])
             cal = s.cal_info or "UNCALIBRATED"
             laf = np.frombuffer(s.laf, dtype=np.float32)
             pos, ki = 0, 0
-            prev_t = 0
             for i in range(len(s)):
                 row = {k: s.cols[k][i] for k in s.COLS}
                 seg = laf[pos:pos + 10]; pos += 10
                 tt = int(row["time"])
                 txt = []
                 while ki < len(keys) and keys[ki] <= tt:
-                    if keys[ki] > prev_t - 1:
-                        txt += notes[keys[ki]]
+                    txt += notes[keys[ki]]
                     ki += 1
-                prev_t = tt
+                j = int(np.searchsorted(it_t, row["time"], side="right")) - 1
+                item = s.items[j][1] if j >= 0 else ""
                 w.writerow([datetime.datetime.fromtimestamp(row["time"]).isoformat(sep=" ", timespec="seconds")]
                            + [f"{row[k]:.1f}" for k in ("LAeq1s", "LCeq1s", "LZeq1s", "LAFmax1s", "LCpeak1s",
                                                         "LAS", "LAeq1m", "LAeqLong", "LCeqLong")]
                            + [f"{ln_of(seg, 10):.1f}", f"{ln_of(seg, 90):.1f}",
-                              f"{row['doseOSHA']:.2f}", f"{row['doseNIOSH']:.2f}", " | ".join(txt), cal])
+                              f"{row['doseOSHA']:.2f}", f"{row['doseNIOSH']:.2f}", item, " | ".join(txt), cal])
         self.status.showMessage(f"Exported {len(s)} rows to {path}")
+        return path
 
-    def export_pdf(self):
+    def export_pdf(self, path=None):
         if not len(self.session):
-            QtWidgets.QMessageBox.information(self, APP_NAME, "Nothing recorded yet: press Start first.")
+            if path is None:
+                QtWidgets.QMessageBox.information(self, APP_NAME, "Nothing recorded yet: press Start first.")
             return
-        os.makedirs(self.cfg["log_dir"], exist_ok=True)
-        default = os.path.join(self.cfg["log_dir"], datetime.datetime.fromtimestamp(self.session.start)
-                               .strftime("SPL_Report_%Y-%m-%d_%H%M.pdf"))
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export PDF report", default, "PDF (*.pdf)")
-        if not path:
-            return
+        os.makedirs(self.out_dir(), exist_ok=True)
+        interactive = path is None
+        if interactive:
+            default = os.path.join(self.out_dir(), datetime.datetime.fromtimestamp(self.session.start)
+                                   .strftime("SPL_Report_%Y-%m-%d_%H%M.pdf"))
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export PDF report", default, "PDF (*.pdf)")
+            if not path:
+                return
         try:
-            write_pdf_report(path, self.session, self.cfg, self.cfg["profile"], self.active_profile())
+            write_pdf_report(path, self.session, self.cfg, self.cfg["profile"], self.active_profile(),
+                             self.pco_plan_label)
             self.status.showMessage(f"Report saved to {path}")
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+            if interactive:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not write the report:\n{e}")
+            if interactive:
+                QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not write the report:\n{e}")
+            else:
+                self.add_event(f"Auto-save of the report failed: {e}")
+        return path
+
+    def autosave(self):
+        """Report + session CSV into the auto-save (OneDrive) folder."""
+        stamp = datetime.datetime.now().strftime("%H%M")
+        d = self.out_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+            self.export_pdf(os.path.join(d, f"SPL_Report_{stamp}.pdf"))
+            self.export_csv(os.path.join(d, f"Session_{stamp}.csv"))
+            self.status.showMessage(f"Report and session CSV saved to {d}")
+        except Exception as e:
+            self.add_event(f"Auto-save failed: {e}")
 
     def toggle_log(self, on):
         if on:
             try:
-                os.makedirs(self.cfg["log_dir"], exist_ok=True)
-                path = os.path.join(self.cfg["log_dir"],
-                                    datetime.datetime.now().strftime("SPL_%Y-%m-%d_%H%M%S.csv"))
+                d = self.out_dir()
+                os.makedirs(d, exist_ok=True)
+                path = os.path.join(d, datetime.datetime.now().strftime("SPL_%Y-%m-%d_%H%M%S.csv"))
                 self.log_file = open(path, "w", newline="", encoding="utf-8-sig")
                 self.log_writer = csv.writer(self.log_file)
                 self.log_writer.writerow(["Timestamp", "LAeq", "LCeq", "LAFmax", "LCpeak", "LAS",
                                           f"LAeq {self.cfg['long_leq_min']} min", "LA10", "LA90",
-                                          "Dose OSHA HC %", "Dose NIOSH %", "Markers / events", "Calibration"])
+                                          "Dose OSHA HC %", "Dose NIOSH %", "Item", "Markers / events",
+                                          "Calibration"])
                 self.log_rows = 0
                 self.pending = []
                 self.pending_notes = []
@@ -3045,8 +4102,39 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.log_file:
                 self.log_file.close()
                 self.status.showMessage(f"Saved {self.log_rows} rows to {self.log_path}")
+            was = self.log_writer is not None
             self.log_file = self.log_writer = None
             self.log_btn.setText("●  Log")
+            if self.sched_key and not self._sched_stopping:      # stopped by hand inside a schedule window
+                self.sched_skip.add(self.sched_key)
+                self.sched_key = None
+            if was and self.cfg["autosave_dir"] and self.cfg["autosave_reports"]:
+                self.autosave()
+
+    def check_schedule(self):
+        now = datetime.datetime.now()
+        active, entry = None, None
+        for i, e in enumerate(self.cfg["schedule"]):
+            if schedule_window(e, now):
+                active, entry = (i, now.strftime("%Y-%m-%d")), e
+                break
+        if active and active != self.sched_key and active not in self.sched_skip and not self.log_writer:
+            if not self.running():
+                self.run_btn.click()
+                if not self.running():
+                    return
+            if entry.get("report", True):
+                self.new_session(confirm=False)
+            self.sched_key = active
+            self.add_event(f"Scheduled logging started ({entry['start']}–{entry['stop']})")
+            self.log_btn.click()
+        elif self.sched_key and active != self.sched_key:
+            self.add_event("Scheduled logging stopped")
+            self._sched_stopping = True
+            if self.log_writer:
+                self.log_btn.click()
+            self._sched_stopping = False
+            self.sched_key = None
 
     def write_log(self):
         """Every N seconds write one row: Leq / max / peak / Ln over that interval, plus markers."""
@@ -3065,9 +4153,49 @@ class MainWindow(QtWidgets.QMainWindow):
                                       f"{max(r['LCpeak1s'] for r in chunk):.1f}",
                                       f"{last['LAS']:.1f}", f"{last['LAeqLong']:.1f}",
                                       f"{ln_of(laf, 10):.1f}", f"{ln_of(laf, 90):.1f}",
-                                      f"{last['doseOSHA']:.2f}", f"{last['doseNIOSH']:.2f}", notes, cal])
+                                      f"{last['doseOSHA']:.2f}", f"{last['doseNIOSH']:.2f}",
+                                      self.current_item, notes, cal])
             self.log_file.flush()
             self.log_rows += 1
+
+    # ---------- NDI
+    def toggle_ndi(self, on):
+        if on:
+            try:
+                self.ndi = NdiSender(self.cfg["ndi_name"], self.cfg["ndi_lib"])
+            except Exception as e:
+                self.ndi = None
+                self.ndi_btn.setChecked(False)
+                QtWidgets.QMessageBox.warning(self, APP_NAME, str(e))
+                return
+            self.ndi_btn.setText("NDI ✓")
+            self.ndi_timer.start(33)
+            self.status.showMessage(f"NDI source '{self.cfg['ndi_name']}' is live")
+        else:
+            self.ndi_timer.stop()
+            if self.ndi:
+                self.ndi.close()
+            self.ndi = None
+            self.ndi_btn.setText("NDI")
+
+    def render_card(self):
+        w, h = (int(x) for x in self.cfg["ndi_size"].split("x"))
+        img = QtGui.QImage(w, h, QtGui.QImage.Format_ARGB32)
+        img.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(img)
+        paint_meter_card(p, QtCore.QRectF(0, 0, w, h), self.card, self.cfg["ndi_transparent"])
+        p.end()
+        return img
+
+    def send_ndi(self):
+        if self.ndi is None:
+            return
+        try:
+            self.ndi.send(self.render_card(), 30)
+        except Exception as e:
+            self.ndi_btn.setChecked(False)
+            self.toggle_ndi(False)
+            self.status.showMessage(f"NDI stopped: {e}")
 
     # ---------- alarms
     def check_alarms(self, rec):
@@ -3164,6 +4292,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def tick(self):
         e = self.engine
         self.meter.tick()
+        now_s = int(time.time())
+        if now_s != self._last_sec:
+            self._last_sec = now_s
+            self.check_schedule()
+            self.pco_panel.tick()
+        e = self.engine
         if not self.running():
             return
         blocks = self.sim.read() if self.sim else []
@@ -3207,6 +4341,23 @@ class MainWindow(QtWidgets.QMainWindow):
                               "color": col, "state": self.thumb.state, "sub": sub}
         if self.menubar_meter:
             self.menubar_meter.set(main, col)
+        lr = self.last_rec
+        lvl = fmt(main).strip()
+        state = "bad" if now < self.bad_until else ("warn" if col == T["yellow"] else "good")
+        self.card = {"level": lvl, "color": col if col != T["fg"] else "#e8e8e8", "state": self.thumb.state,
+                     "sub": f"L{w}{t}  ·  LAeq 1 min {fmt(self.last_1m).strip()}"
+                            + (f"  ·  {self.current_item}" if self.current_item else "")}
+        if self.cfg["companion_on"] or self.web:
+            api = {"level": lvl, "leq1m": fmt(lr.get("LAeq1m")).strip(), "leqlong": fmt(lr.get("LAeqLong")).strip(),
+                   "lceqlong": fmt(lr.get("LCeqLong")).strip(), "peak": fmt(e.L(e.max_pk)).strip(),
+                   "dose": f"{e.dose[2].dose * 100:.0f}%", "state": state,
+                   "color": QtGui.QColor(PALETTES["dark"][{"bad": "red", "warn": "yellow", "good": "green"}[state]]).name(),
+                   "label": f"L{w}{t}", "item": self.current_item, "red_at": self.cfg["alarm"],
+                   "recording": bool(self.log_writer), "profile": self.cfg["profile"]}
+            if self.web:
+                self.web.api = api
+            if self.cfg["companion_on"]:
+                self.companion.send(self.cfg, api)
         m.bar.setLevel(main)
         m.history.add(main, self.last_1m)
         self.rta_panel.tick(e)
@@ -3238,6 +4389,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, ev):
         self.stop()
         self.theater.player.stop()
+        self.toggle_ndi(False)
         if self.web:
             self.web.stop()
         if self.mini:
