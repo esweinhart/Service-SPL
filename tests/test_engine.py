@@ -163,6 +163,8 @@ def test_settings_backup():
     d = tempfile.mkdtemp()
     sm.CFG_DIR, sm.CFG_PATH = d, os.path.join(d, "config.json")
     sm.OLD_CFG_PATH = os.path.join(d, "none.json")
+    with open(sm.CFG_PATH, "w") as f:      # no menu-bar item: AppKit aborts on a headless CI Mac
+        json.dump({"menubar": False}, f)
     w = sm.MainWindow()
     w.cfg["profiles"]["TM1 #210345"] = dict(sm.DEFAULTS["profiles"]["Default"], offset=101.5, calibrated=True,
                                            cal_points=[[20, -0.8], [1000, 0.0], [20000, -1.2]])
