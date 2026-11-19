@@ -1,54 +1,16 @@
-# Builds standalone SPL Monitor apps (no Python needed on the target machine)
+# Builds standalone ServiceSPL apps (no Python needed on the target machine)
 # on every push to main, and publishes them to the "latest" GitHub release.
 name: Build apps
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  mac:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel    # Intel Macs
-            arch: Intel
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install numpy scipy PySide6 sounddevice pyinstaller
-      - name: Build .app
-        run: |
-          pyinstaller --noconfirm --windowed --name "SPL Monitor" \
-            --osx-bundle-identifier com.splmonitor.app \
-            --collect-data _sounddevice_data \
-            spl_monitor.py
-          APP="dist/SPL Monitor.app"
-          PL="$APP/Contents/Info.plist"
-          # Without this key macOS hands the app silence instead of the mic.
-          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SPL Monitor measures sound level from your microphone.'" "$PL" \
-            || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SPL Monitor measures sound level from your microphone.'" "$PL"
-          /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PL" || true
-          # Ad-hoc sign (free, no Apple developer account) so the mic permission sticks.
-          codesign --force --deep --sign - "$APP"
-          codesign --verify --deep --strict "$APP"
-          ditto -c -k --keepParent "$APP" "SPL-Monitor-Mac-${{ matrix.arch }}.zip"
-      - uses: actions/upload-artifact@v5
-        with:
-          name: SPL-Monitor-Mac-${{ matrix.arch }}
-          path: SPL-Monitor-Mac-${{ matrix.arch }}.zip
-
   # GitHub's Apple Silicon build machines are not available to this account
   # (jobs are never picked up), so build a Universal app (runs natively on
   # Apple Silicon AND on Intel) on an Intel machine. numpy/scipy only ship
@@ -77,24 +39,32 @@ jobs:
           for p in numpy scipy cffi; do delocate-merge whl_x86/$p-*.whl whl_arm/$p-*.whl -w fused; done
           ls fused
           pip install fused/*.whl
-          pip install PySide6 sounddevice pyinstaller
+          pip install PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa
+      - name: Self-test (IEC 61672 + engine)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          . venv/bin/activate
+          python tests/test_iec61672.py
+          python tests/test_engine.py
       - name: Build Universal .app
         run: |
           . venv/bin/activate
-          pyinstaller --noconfirm --windowed --name "SPL Monitor" \
+          pyinstaller --noconfirm --windowed --name "ServiceSPL" \
             --target-arch universal2 \
-            --osx-bundle-identifier com.splmonitor.app \
+            --osx-bundle-identifier com.servicespl.app \
             --collect-data _sounddevice_data \
+            --icon assets/ServiceSPL.icns \
             spl_monitor.py
-          APP="dist/SPL Monitor.app"
+          APP="dist/ServiceSPL.app"
           PL="$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'SPL Monitor measures sound level from your microphone.'" "$PL" \
-            || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'SPL Monitor measures sound level from your microphone.'" "$PL"
+          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'ServiceSPL measures sound level from your microphone.'" "$PL" \
+            || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'ServiceSPL measures sound level from your microphone.'" "$PL"
           /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PL" || true
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict "$APP"
           echo "--- architecture check (every binary must list arm64) ---"
-          lipo -archs "$APP/Contents/MacOS/SPL Monitor"
+          lipo -archs "$APP/Contents/MacOS/ServiceSPL"
           bad=0
           while IFS= read -r f; do
             if file "$f" | grep -q "Mach-O"; then
@@ -102,11 +72,15 @@ jobs:
             fi
           done < <(find "$APP" -type f \( -name "*.so" -o -name "*.dylib" -o -perm -u+x \))
           [ $bad = 0 ] || exit 1
-          ditto -c -k --keepParent "$APP" "SPL-Monitor-Mac-AppleSilicon.zip"
+          ditto -c -k --keepParent "$APP" "ServiceSPL-Mac-AppleSilicon.zip"
+          mkdir dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname ServiceSPL -srcfolder dmg -ov -format UDZO "ServiceSPL-Mac-AppleSilicon.dmg"
       - uses: actions/upload-artifact@v5
         with:
-          name: SPL-Monitor-Mac-AppleSilicon
-          path: SPL-Monitor-Mac-AppleSilicon.zip
+          name: ServiceSPL-Mac-AppleSilicon
+          path: |
+            ServiceSPL-Mac-AppleSilicon.zip
+            ServiceSPL-Mac-AppleSilicon.dmg
 
   windows:
     runs-on: windows-latest
@@ -121,16 +95,16 @@ jobs:
           pip install numpy scipy PySide6 sounddevice pyinstaller
       - name: Build .exe
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name SPLMonitor --collect-data _sounddevice_data spl_monitor.py
-          Compress-Archive -Path dist\SPLMonitor.exe -DestinationPath SPL-Monitor-Windows.zip
+          pyinstaller --noconfirm --onefile --windowed --name ServiceSPL --icon assets/ServiceSPL.ico --collect-data _sounddevice_data spl_monitor.py
+          Compress-Archive -Path dist\ServiceSPL.exe -DestinationPath ServiceSPL-Windows.zip
       - uses: actions/upload-artifact@v5
         with:
-          name: SPL-Monitor-Windows
-          path: SPL-Monitor-Windows.zip
+          name: ServiceSPL-Windows
+          path: ServiceSPL-Windows.zip
 
   release:
-    needs: [mac, mac-universal, windows]
-    # Publish whatever built, even if one machine type was unavailable.
+    needs: [mac-universal, windows]
+        # main -> "latest" release; any other branch -> "preview" pre-release (for testing before merge).
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -144,6 +118,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest out/*.zip --title "SPL Monitor (latest build)" \
-            --notes "Built automatically from commit ${GITHUB_SHA::7}. Download the zip for your computer: Mac-AppleSilicon (Universal: runs natively on M1 and newer, and on Intel), Mac-Intel, or Windows."
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG=latest; TITLE="ServiceSPL (latest build)"; PRE=""
+          else
+            TAG=preview; TITLE="ServiceSPL PREVIEW (branch $GITHUB_REF_NAME)"; PRE="--prerelease"
+          fi
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" $(ls out/*.zip out/*.dmg 2>/dev/null) --title "$TITLE" $PRE --target "$GITHUB_SHA" \
+            --notes "Built automatically from commit ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Mac (Apple Silicon): download ServiceSPL-Mac-AppleSilicon.dmg, open it and drag ServiceSPL to Applications. The same app is also in the .zip. Windows: ServiceSPL-Windows.zip."

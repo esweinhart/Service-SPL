@@ -1,4 +1,6 @@
-# SPL Monitor: project notes
+# ServiceSPL (formerly SPL Monitor): project notes
+
+Renamed to **ServiceSPL** by Eric on 2026-11-19. Bundle id `com.servicespl.app`; builds are `ServiceSPL-Mac-AppleSilicon.dmg/.zip` and `ServiceSPL-Windows.zip` (Intel-only Mac build dropped by Eric on 2026-11-19). The source file stays `spl_monitor.py`. Config moved to a `ServiceSPL` folder; the old `SPLMonitor` config is read on first launch.
 
 ## Hardware / setups
 - **Windows:** Focusrite Scarlett + reference mic, or a mic on the **Waves SoundGrid** network via the SoundGrid ASIO driver (pick the driver channel).
@@ -6,22 +8,25 @@
 - **Display:** the Mac runs the meter and turns on **Web view**. The **Axis Proton** (SuperRack SoundGrid host) shows it in Edge (`--app=http://<mac-ip>:8080`) over the regular LAN, not the SoundGrid port. Nothing is installed on the Proton.
 - Companion runs on a separate Mac, and the GainStage OSC bridge runs on the Proton.
 
-## Features (current)
-- Main meter: LAS by default (A/C/Z, Fast/Slow selectable)
-- Tiles: LAeq 1 min, LAeq long (15 min default), LAeq since reset, LAFmax, LCpeak
-- "Red at" level in the toolbar. Yellow starts N dB below red (default 5, 0 = off).
-- Thumb: green up below the red level, red down at or above it (3 s hold). Can follow the live meter or LAeq 1 min.
-- Mini mode: small frameless box, draggable, 📌 keep-on-top, double-click to return
-- Logging: CSV (UTF-8 BOM for Excel) every 1 s / 10 s / 1 min. Each row has the interval LAeq, LCeq, LAFmax, LCpeak, end-of-interval LAS, LAeq long and the calibration info.
-- Calibration: acoustic calibrator (94/114 dB) measured A-weighted over 3 s, or a manual offset. Saved in the config.
-- Web view: built-in read-only HTTP server. `/` serves the page and `/data` serves JSON polled every 200 ms. Default port 8080.
-- Device auto-pick: USB measurement mic, then Scarlett (WASAPI > MME/Core Audio). ASIO enabled. The ASIO path opens only the selected channel.
+## Features (current, v2.0)
+- See README.md for the full user-facing list. v2.0 (Nov 2026) added: calibration wizard + per-mic profiles (calibrator /
+  UMIK cal file with FIR correction + Sens Factor / manual), LCeq, LA10/50/90, true-peak LCpeak, 1/3-octave RTA +
+  spectrogram, OSHA PEL/HC + NIOSH dosimeter, theater calibration (pink noise per channel, presets, auto run), room EQ
+  helper, session history/markers/alarms, session CSV + PDF report, scheduled logging, auto-save to OneDrive in dated
+  folders, Planning Center Services Live (item stamps, per-item levels), Companion (OSC custom variables + button paint,
+  HTTP /api/json), NDI output (ctypes to the installed NDI runtime), menu-bar meter (pyobjc NSStatusItem), dock-based
+  dashboard, light/dark following macOS, in-app Guide.
+- Web view: `/` page, `/data` JSON for the page, `/api/json` and `/api/level` for other software.
 
 ## Design decisions
-- The user asked for a **simple meter + logging**. The RTA and history graph were removed on purpose.
+- v1 was deliberately a simple meter + logging. In Nov 2026 Eric asked for the full pro feature set, so the RTA and
+  history came back as optional dock panels; the big meter stays the centre of the window.
+- UI choices (Eric, 2026-11-19): dashboard with dockable panels, follow macOS light/dark, big number + scrolling history,
+  menu bar "● 87.3". AI chat assistant was dropped in favour of the built-in Guide.
+- NDI uses ctypes against the user's installed NDI runtime because cyndilib has no Intel-Mac wheel (Universal build).
 - A/C weighting: bilinear transform with a pre-warped 12.2 kHz pole, normalized to 0 dB at 1 kHz. Within IEC 61672 Class 1 tolerance up to 12.5 kHz at 48 kHz.
 - Time weighting: exponential, 125 ms / 1 s. Leq is computed from per-second energy sums (2 h kept).
-- Config: `%APPDATA%\SPLMonitor\config.json` on Windows, `~/Library/Application Support/SPLMonitor/config.json` on Mac.
+- Config: `%APPDATA%\ServiceSPL\config.json` on Windows, `~/Library/Application Support/ServiceSPL/config.json` on Mac (falls back to the old SPLMonitor folder).
 - Mac .app build adds NSMicrophoneUsageDescription and an ad-hoc codesign; without it the mic reads silence.
 
 ## Tested so far (in a Linux sandbox, simulated input)
@@ -31,5 +36,4 @@
 - **Not yet tested on real Windows, a real Mac, a Scarlett, SoundGrid or a USB mic.**
 
 ## Open ideas
-- Load a USB mic calibration file (sensitivity factor) so calibration works without a calibrator
-- Send the level to Companion (OSC/HTTP) to show on a Stream Deck button
+- Test NDI, the menu-bar item and Planning Center Live against the real thing on Eric's Mac
