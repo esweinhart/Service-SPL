@@ -79,6 +79,21 @@ itself.
 | **Match a reference SPL meter** | No calibrator, but you have a trusted handheld meter | Play steady pink noise, hold the meter next to the mic, set the **same weighting (A/C/Z) and speed** as the handheld, type its reading and press **Measure (10 s)**. |
 | **Manual** | You know the numbers | Either "0 dBFS sine = X dB SPL", or mic sensitivity (mV/Pa) + preamp gain + interface dBu at 0 dBFS. |
 
+**Calibrate with pink noise from the room speakers (Match a reference SPL meter)**
+1. Set the mic's preamp gain and phantom power where you'll leave them for the service. If you change the gain
+   later, calibrate again.
+2. Put the mic (e.g. the TM1) on a stand at the main listening position, pointing at the ceiling. Hold or mount
+   your handheld meter right next to it, at the same height and pointing the same way.
+3. Play pink noise through the main speakers. Use **Theater cal → Play** (send it to your console), or your
+   console's generator, at about **-20 dBFS**.
+4. Bring the speakers up until the handheld reads about **85 dB**. Keep the room quiet: no HVAC blasts, talking or
+   walking around.
+5. Set the handheld and ServiceSPL to the **same weighting and speed**. **Z (flat) + Slow** is the easiest match,
+   or C on both if the handheld has no Z.
+6. Press **Start meter** if it isn't running, and wait until both readings settle.
+7. Type in what the handheld reads, then press **Measure (10 s)**. Don't move anything while it measures.
+8. Press **Next**. The reading in the same weighting should match the handheld. Then **Save**.
+
 **UMIK tips**
 - Download your mic's file from miniDSP with its serial number. There are two: **0°** (mic pointing at the source) and
   **90°** (mic pointing at the ceiling, typical for rooms and theaters).
@@ -90,8 +105,9 @@ itself.
 - In Calibrate…, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
   sensitivity are read from it, and the profile is named after the mic (e.g. "TM1 #210345").
 - Analog mics have no Sens Factor, because the level depends on your preamp gain. So the file fixes the *frequency
-  response*, and then you set the *absolute level* with the **acoustic calibrator** step on the same profile. Do the
-  calibrator step again whenever you change the preamp gain.
+  response*, and then you set the *absolute level* with the **acoustic calibrator** or the pink noise
+  **Match a reference SPL meter** step on the same profile. The wizard goes straight there after you save the file.
+  Do it again whenever you change the preamp gain.
 - Phantom power on, and keep the preamp gain where you'll leave it for the service.
 
 **Compare like with like.** A-weighting reads lower than C or Z on pink noise and bass-heavy sound, often by

@@ -2071,7 +2071,7 @@ class CalWizard(QtWidgets.QDialog):
         super().__init__(main)
         self.main = main
         self.setWindowTitle("Calibration wizard")
-        self.setMinimumSize(560, 430)
+        self.setMinimumSize(600, 520)
         self.result = None        # dict(offset, info, method, points, ...)
         self.readings = collections.deque(maxlen=20)
         v = QtWidgets.QVBoxLayout(self)
@@ -2155,8 +2155,8 @@ class CalWizard(QtWidgets.QDialog):
     def _build_calibrator_page(self):
         lay = self._page("3 · Acoustic calibrator")
         f = QtWidgets.QFormLayout()
-        self.c_level = QtWidgets.QComboBox(); self.c_level.setEditable(True)
-        self.c_level.addItems(["94.0", "114.0", "104.0", "124.0"])
+        self.c_level = QtWidgets.QDoubleSpinBox(); self.c_level.setRange(60, 140); self.c_level.setDecimals(1)
+        self.c_level.setValue(94.0); self.c_level.setSuffix(" dB SPL")
         self.c_freq = QtWidgets.QComboBox(); self.c_freq.addItems(["1 kHz", "250 Hz"])
         f.addRow("Calibrator level (dB SPL)", self.c_level)
         f.addRow("Calibrator frequency", self.c_freq)
@@ -2257,13 +2257,26 @@ class CalWizard(QtWidgets.QDialog):
 
     def _build_ref_page(self):
         lay = self._page("3 · Match a reference SPL meter")
-        lay.addWidget(self._note(
-            "1. Play steady pink noise at a typical level (75 to 90 dB). Use Theater cal → Play, or your console's "
-            "generator.\n2. Put your reference meter right next to the mic, pointing the same way.\n"
-            "3. Set the weighting and speed below to match the reference meter (most read C or A, Slow).\n"
-            "4. Type what the reference meter reads, then press Measure (10 s)."))
+        steps_box = QtWidgets.QScrollArea(); steps_box.setWidgetResizable(True)
+        steps_box.setFrameShape(QtWidgets.QFrame.NoFrame); steps_box.setMinimumHeight(150)
+        lay.addWidget(steps_box, 1)
+        steps_box.setWidget(self._note(
+            "Calibrate with pink noise from the room speakers\n"
+            "1. Set the TM1's preamp gain and phantom power where you'll leave them for the service. If you change "
+            "the gain later, calibrate again.\n"
+            "2. Put the TM1 on a stand at the main listening position, pointing at the ceiling. Hold or mount your "
+            "handheld meter right next to it, at the same height and pointing the same way.\n"
+            "3. Play pink noise through the main speakers. Use Theater cal → Play (send it to your console), or your "
+            "console's generator, at about -20 dBFS.\n"
+            "4. Bring the speakers up until the handheld reads about 85 dB. Keep the room quiet: no HVAC blasts, "
+            "talking or walking around.\n"
+            "5. Set the handheld and this page to the same weighting and speed. Z (flat) and Slow is the easiest "
+            "match, or C on both if the handheld has no Z.\n"
+            "6. Press Start meter if it isn't running, and wait until both readings settle.\n"
+            "7. Type in what the handheld reads, then press Measure (10 s). Don't move anything while it measures.\n"
+            "8. Press Next. The reading in the same weighting should match the handheld. Then Save."))
         f = QtWidgets.QFormLayout()
-        self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["C", "A", "Z"])
+        self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["Z", "C", "A"])
         self.r_t = QtWidgets.QComboBox(); self.r_t.addItems(["Slow", "Fast"])
         self.r_ref = QtWidgets.QDoubleSpinBox(); self.r_ref.setRange(30, 140); self.r_ref.setDecimals(1)
         self.r_ref.setValue(85.0); self.r_ref.setSuffix(" dB")
@@ -2378,7 +2391,7 @@ class CalWizard(QtWidgets.QDialog):
         if e.cal_done and not self.ref_busy:
             raw = e.finish_cal()
             try:
-                ref = float(self.c_level.currentText())
+                ref = float(self.c_level.value())
             except ValueError:
                 ref = 94.0
             self.cal_raw = (raw, ref)
@@ -3247,6 +3260,12 @@ hidden from the <b>View</b> menu. The layout is remembered.</p>"""),
 <li><b>Cal file</b>: load the UMIK-1/UMIK-2 file from miniDSP (enter your serial number on their site). This fixes the
 frequency response and, with the Mac's input volume for the mic at 100 %, sets the level from the Sens Factor.
 Use the <b>90°</b> file when the mic points at the ceiling.</li>
+<li><b>Match a reference SPL meter</b> (pink noise from the room speakers): gain and phantom set first. Put the
+mic on a stand at the main listening position, pointing at the ceiling, with your handheld meter right next to it
+at the same height. Play pink noise (Theater cal → Play, or your console's generator) at about -20 dBFS and bring the
+speakers up until the handheld reads about 85 dB. Set the handheld and ServiceSPL to the <b>same weighting and
+speed</b> (Z and Slow is easiest, C on both if the handheld has no Z). Wait for the readings to settle, type the
+handheld's reading, press Measure (10 s), check, then Save.</li>
 <li><b>Manual</b>: type the mic's mV/Pa and your interface gain, or an offset you already know.</li></ul>
 <p>Tick “pick automatically” and the profile follows that mic whenever you select it. The status bar shows which profile
 is active and warns when a calibration is over 30 days old.</p>"""),
