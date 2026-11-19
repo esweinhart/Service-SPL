@@ -4,7 +4,7 @@ name: Build apps
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy PySide6 sounddevice pyinstaller
+          pip install numpy scipy PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa
+      - name: Self-test (IEC 61672 + engine)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tests/test_iec61672.py
+          python tests/test_engine.py
       - name: Build .app
         run: |
           pyinstaller --noconfirm --windowed --name "SPL Monitor" \
@@ -77,7 +83,7 @@ jobs:
           for p in numpy scipy cffi; do delocate-merge whl_x86/$p-*.whl whl_arm/$p-*.whl -w fused; done
           ls fused
           pip install fused/*.whl
-          pip install PySide6 sounddevice pyinstaller
+          pip install PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa
       - name: Build Universal .app
         run: |
           . venv/bin/activate
@@ -131,6 +137,7 @@ jobs:
   release:
     needs: [mac, mac-universal, windows]
     # Publish whatever built, even if one machine type was unavailable.
+    # main -> "latest" release; any other branch -> "preview" pre-release (for testing before merge).
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -144,6 +151,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest out/*.zip --title "SPL Monitor (latest build)" \
-            --notes "Built automatically from commit ${GITHUB_SHA::7}. Download the zip for your computer: Mac-AppleSilicon (Universal: runs natively on M1 and newer, and on Intel), Mac-Intel, or Windows."
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG=latest; TITLE="SPL Monitor (latest build)"; PRE=""
+          else
+            TAG=preview; TITLE="SPL Monitor PREVIEW (branch $GITHUB_REF_NAME)"; PRE="--prerelease"
+          fi
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" out/*.zip --title "$TITLE" $PRE --target "$GITHUB_SHA" \
+            --notes "Built automatically from commit ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Download the zip for your computer: Mac-AppleSilicon (Universal: runs natively on M1 and newer, and on Intel), Mac-Intel, or Windows."
