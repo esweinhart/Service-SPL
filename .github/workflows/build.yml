@@ -11,55 +11,6 @@ permissions:
   contents: write
 
 jobs:
-  mac:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel    # Intel Macs
-            arch: Intel
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install numpy scipy PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa
-      - name: Self-test (IEC 61672 + engine)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          python tests/test_iec61672.py
-          python tests/test_engine.py
-      - name: Build .app
-        run: |
-          pyinstaller --noconfirm --windowed --name "ServiceSPL" \
-            --osx-bundle-identifier com.servicespl.app \
-            --collect-data _sounddevice_data \
-            --icon assets/ServiceSPL.icns \
-            spl_monitor.py
-          APP="dist/ServiceSPL.app"
-          PL="$APP/Contents/Info.plist"
-          # Without this key macOS hands the app silence instead of the mic.
-          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'ServiceSPL measures sound level from your microphone.'" "$PL" \
-            || /usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'ServiceSPL measures sound level from your microphone.'" "$PL"
-          /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$PL" || true
-          # Ad-hoc sign (free, no Apple developer account) so the mic permission sticks.
-          codesign --force --deep --sign - "$APP"
-          codesign --verify --deep --strict "$APP"
-          ditto -c -k --keepParent "$APP" "ServiceSPL-Mac-${{ matrix.arch }}.zip"
-          mkdir dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
-          hdiutil create -volname ServiceSPL -srcfolder dmg -ov -format UDZO "ServiceSPL-Mac-${{ matrix.arch }}.dmg"
-      - uses: actions/upload-artifact@v5
-        with:
-          name: ServiceSPL-Mac-${{ matrix.arch }}
-          path: |
-            ServiceSPL-Mac-${{ matrix.arch }}.zip
-            ServiceSPL-Mac-${{ matrix.arch }}.dmg
-
   # GitHub's Apple Silicon build machines are not available to this account
   # (jobs are never picked up), so build a Universal app (runs natively on
   # Apple Silicon AND on Intel) on an Intel machine. numpy/scipy only ship
@@ -89,6 +40,13 @@ jobs:
           ls fused
           pip install fused/*.whl
           pip install PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa
+      - name: Self-test (IEC 61672 + engine)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          . venv/bin/activate
+          python tests/test_iec61672.py
+          python tests/test_engine.py
       - name: Build Universal .app
         run: |
           . venv/bin/activate
@@ -145,9 +103,8 @@ jobs:
           path: ServiceSPL-Windows.zip
 
   release:
-    needs: [mac, mac-universal, windows]
-    # Publish whatever built, even if one machine type was unavailable.
-    # main -> "latest" release; any other branch -> "preview" pre-release (for testing before merge).
+    needs: [mac-universal, windows]
+        # main -> "latest" release; any other branch -> "preview" pre-release (for testing before merge).
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -168,4 +125,4 @@ jobs:
           fi
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" $(ls out/*.zip out/*.dmg 2>/dev/null) --title "$TITLE" $PRE --target "$GITHUB_SHA" \
-            --notes "Built automatically from commit ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Mac: download ServiceSPL-Mac-AppleSilicon.dmg (Universal: runs natively on M1 and newer, and on Intel), open it and drag ServiceSPL to Applications. Also as .zip, an Intel-only build, and Windows."
+            --notes "Built automatically from commit ${GITHUB_SHA::7} on $GITHUB_REF_NAME. Mac (Apple Silicon): download ServiceSPL-Mac-AppleSilicon.dmg, open it and drag ServiceSPL to Applications. The same app is also in the .zip. Windows: ServiceSPL-Windows.zip."

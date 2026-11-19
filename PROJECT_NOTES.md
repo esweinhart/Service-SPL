@@ -1,6 +1,6 @@
 # ServiceSPL (formerly SPL Monitor): project notes
 
-Renamed to **ServiceSPL** by Eric on 2026-11-19. Bundle id `com.servicespl.app`; builds are `ServiceSPL-Mac-*.dmg/.zip` and `ServiceSPL-Windows.zip`. The source file stays `spl_monitor.py`. Config moved to a `ServiceSPL` folder; the old `SPLMonitor` config is read on first launch.
+Renamed to **ServiceSPL** by Eric on 2026-11-19. Bundle id `com.servicespl.app`; builds are `ServiceSPL-Mac-AppleSilicon.dmg/.zip` and `ServiceSPL-Windows.zip` (Intel-only Mac build dropped by Eric on 2026-11-19). The source file stays `spl_monitor.py`. Config moved to a `ServiceSPL` folder; the old `SPLMonitor` config is read on first launch.
 
 ## Hardware / setups
 - **Windows:** Focusrite Scarlett + reference mic, or a mic on the **Waves SoundGrid** network via the SoundGrid ASIO driver (pick the driver channel).

@@ -2,8 +2,8 @@
 
 *(formerly ServiceSPL: your settings and mic profiles carry over automatically)*
 
-A pro sound level meter for services, shows, theaters and mix rooms. It runs as a normal Mac app (no Python needed)
-and on Windows.
+A pro sound level meter for services, shows, theaters and mix rooms. It runs as a normal Apple Silicon Mac app (no Python
+needed) and on Windows.
 
 **What it does**
 
@@ -32,8 +32,8 @@ and on Windows.
 ### Mac (no Python needed)
 1. Open this repo's **Releases** page. **latest** is the released version, **preview** is the newest test build of
    work in progress.
-2. Download **ServiceSPL-Mac-AppleSilicon.dmg** (or the .zip). It's a Universal app, so it runs natively on M1/M2/M3/M4 *and* on
-   Intel Macs. (**ServiceSPL-Mac-Intel.dmg** is an Intel-only build, if you prefer.)
+2. Download **ServiceSPL-Mac-AppleSilicon.dmg** (or the .zip) for M1/M2/M3/M4 and newer Macs. Only the Apple Silicon
+   Mac app is built now. Intel Macs can still run it from source (below).
 3. Open the .dmg and drag **ServiceSPL** onto the Applications folder next to it.
 4. First launch: **right-click → Open → Open**. If macOS still refuses, go to System Settings → Privacy & Security,
    scroll down and click **Open Anyway**. (The app is ad-hoc signed, not notarized, which is why macOS asks once.)
