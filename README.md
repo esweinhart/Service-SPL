@@ -159,13 +159,42 @@ Noise is pink, -20 dBFS RMS (AES17: a full-scale sine = 0 dBFS), band-limited 50
 - Venue and Operator fields go on the report.
 
 ### Service · Planning Center Live
-1. At **https://api.planningcenteronline.com/oauth/applications** create a **Personal Access Token**.
-2. Paste the **Application ID** and **Secret**, press **Connect** (on a Mac the secret is saved in your Keychain).
-3. Pick the service type and plan (today's is selected) and tick **Follow Live**.
-4. As Services Live advances, the current item shows in big type, stamps every log row (`Item` column), becomes an
-   event, and gets its own LAeq / LCeq / LCpeak in the table. An item whose LAeq goes over **Item target** turns red
-   and raises an alarm. The PDF report gets a per-item table.
+ServiceSPL follows **Services Live**: when whoever runs Live advances to the next item, a new item starts, the log rows
+get stamped with it, and the levels are kept per item. Setup takes about 3 minutes, once.
 
+**1. Make a Personal Access Token (in your browser)**
+1. Sign in to Planning Center with an account that can **see the plans** you want to follow (Services *Viewer* or higher
+   on that service type). The token gets the same access as that account.
+2. Go to **https://api.planningcenteronline.com/oauth/applications** (the panel's **Open token page** button goes there).
+3. Under **Personal Access Tokens**, click **New Personal Access Token**.
+4. Description: `ServiceSPL`. Keep the newest **Services** API version offered. Click **Submit**.
+5. Copy the **Application ID** and the **Secret**. Keep the page open until step 2 works.
+
+**2. Connect ServiceSPL**
+1. **View → Service · Planning Center Live** to show the panel.
+2. Paste the Application ID into the first box and the Secret into the second, then press **Connect**. The status line
+   says *Connected · N service types*. On a Mac the secret is saved in your Keychain, so this is a one-time step.
+3. Pick the **service type** (left drop-down). The right one lists recent and upcoming plans; today's is selected.
+4. Set **Item target LAeq**. An item whose average goes over it turns red and raises an alarm (95 dB is a common
+   worship target).
+
+**3. On the day**
+1. Start the meter and logging (or let the **Schedule** do it).
+2. Tick **Follow Live**. The status says *Following Live: …*.
+3. Someone opens **Services Live** for that plan, **takes control** and advances items. ServiceSPL checks every 3 s and
+   shows **Now: <item> LAeq …**.
+4. Every log row has an `Item` column. Afterwards the panel table and the PDF report list LAeq / LCeq / LAFmax / LCpeak
+   per item.
+
+**Troubleshooting**
+| Symptom | Fix |
+|---|---|
+| `401` / Unauthorized | Wrong Application ID or Secret, or the token was revoked. Make a new token. |
+| Connected, but no service types or plans | The account behind the token can't see them. Give it Viewer access in Services. |
+| Following, but the item never changes | Nobody has taken control in Services Live, or a different plan is picked. Check the plan's date. |
+| Couldn't connect / timed out | The Mac needs internet access to `api.planningcenteronline.com`. |
+
+The **? Setup help** button in the panel opens these same steps inside the app.
 No Planning Center? **Start item manually…** does the same with names you type.
 
 ---
@@ -256,8 +285,7 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 | No menu-bar number | Settings → Display → menu-bar box. (If the Mac build lacks the Cocoa bridge, a colored icon is shown instead.) |
 | Companion button doesn't change | Create the custom variables first; check OSC is enabled in Companion and the IP/port match; for *Paint this button*, use page/row/column like `1/0/0`. |
 | NDI button says runtime not found | Install NDI Tools (ndi.video/tools), or browse to `libndi.dylib` in Settings → Integrations. |
-| Planning Center: "Couldn't connect" | Use a *Personal Access Token* (Application ID + Secret), not your login. Check the Mac has internet. |
-| Planning Center doesn't follow | Someone has to be running **Services Live** for that plan; check you picked today's plan. |
+| Planning Center problems | See the troubleshooting table in the Planning Center section above, or **? Setup help** in the panel. |
 | Nothing in OneDrive | Settings → Logging: auto-save folder set? Is OneDrive signed in and syncing? Files land under `ServiceSPL/<year>/<date>`. |
 | Schedule didn't start | The app must be open (it can be minimized or in mini mode). Check the window's days/date and that it's ticked On. |
 | Theater cal: no sound | Pick the right Output and check the Out numbers match your patch; for ASIO, only that one channel is opened. |

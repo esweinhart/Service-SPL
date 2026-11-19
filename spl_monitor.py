@@ -656,7 +656,10 @@ class Tile(QtWidgets.QFrame):
         self.t = QtWidgets.QLabel(title)
         self.v = QtWidgets.QLabel()
         self.v.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.v.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.t.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.s = QtWidgets.QLabel("")
+        self.s.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.s.setAlignment(QtCore.Qt.AlignRight)
         self.size = size
         self.color = None
@@ -674,7 +677,15 @@ class Tile(QtWidgets.QFrame):
         self.v.setStyleSheet(f"color:{self.color or T['fg']}; font-size:{self.size}pt; font-weight:600;"
                              f"{MONO} background:transparent;")
 
+    def set_size(self, pt):
+        pt = int(pt)
+        if pt != self.size:
+            self.size = pt
+            self._paint_value()
+
     def set(self, val, color=None, sub=None, title=None, text=None):
+        if text is None and (val is None or not np.isfinite(val)):
+            color = T["dim"]          # stopped / no data yet: a quiet grey "--.-"
         self.v.setText(text if text is not None else fmt(val))
         if color != self.color:
             self.color = color
@@ -735,7 +746,7 @@ class HistoryStrip(QtWidgets.QWidget):
         self.lo, self.hi = 40, 120
         self.leq_pts = collections.deque()
         self._last = 0
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(50)
 
     def add(self, v, leq1m=None):
         now = time.time()
@@ -827,6 +838,11 @@ class Thumb(QtWidgets.QWidget):
                                     ("off", "#8a9099", ""))}
         self.state = "off"
 
+    def set_size(self, px):
+        px = int(px)
+        if px != self.width():
+            self.setFixedSize(px, px)
+
     def setState(self, st):
         if st != self.state:
             self.state = st
@@ -860,7 +876,7 @@ class RtaWidget(QtWidgets.QWidget):
         self.labels, self.levels = [], np.zeros(0)
         self.peaks = np.zeros(0)
         self.lo, self.hi = 20, 120
-        self.setMinimumHeight(170)
+        self.setMinimumHeight(90)
 
     def set_data(self, labels, levels):
         if len(labels) != len(self.labels):
@@ -917,7 +933,7 @@ class SpectrogramWidget(QtWidgets.QWidget):
         self.top, self.range = 100.0, 70.0
         self.fs = None
         self.buf = np.zeros(0)
-        self.setMinimumHeight(130)
+        self.setMinimumHeight(60)
 
     def setup(self, fs):
         self.fs = fs
@@ -1132,7 +1148,7 @@ class MeterPanel(QtWidgets.QWidget):
         ml = self.main_tile.layout()
         ml.removeWidget(self.main_tile.v)
         hr = QtWidgets.QHBoxLayout()
-        hr.addWidget(self.thumb); hr.addStretch(); hr.addWidget(self.main_tile.v)
+        hr.addWidget(self.thumb); hr.addWidget(self.main_tile.v, 1)
         ml.insertLayout(1, hr)
         self.history = HistoryStrip(main.cfg["history_secs"])
         self.bar = LevelBar()
@@ -1149,12 +1165,45 @@ class MeterPanel(QtWidgets.QWidget):
         self.t_pk = Tile("LCpeak", tip="Highest C-weighted true peak since reset (4x oversampled)")
         self.t_l10 = Tile("LA10", tip="Level exceeded 10 % of the time over the long window (LAF)")
         self.t_l90 = Tile("LA90", tip="Level exceeded 90 % of the time over the long window: the background")
-        for i, t in enumerate((self.t_1m, self.t_long, self.t_tot, self.t_clong,
-                               self.t_max, self.t_pk, self.t_l10, self.t_l90)):
-            grid.addWidget(t, i // 4, i % 4)
+        self.grid = grid
+        self.cols = 0
         v.addLayout(grid)
         self.banner_until = 0
         self.apply_style()
+        self.setMinimumSize(260, 220)
+        self.reflow()
+
+    def reflow(self):
+        """Scale the big number, thumb and tiles to the window, and re-grid the tiles when narrow / short."""
+        w, h = max(self.width(), 260), max(self.height(), 220)
+        cols = 4 if w >= 720 else 2
+        small = [self.t_1m, self.t_long, self.t_tot, self.t_clong, self.t_max, self.t_pk, self.t_l10, self.t_l90]
+        show = small if h >= 520 or cols == 4 else [self.t_1m, self.t_long, self.t_max, self.t_pk]
+        if h < 330:
+            show = [self.t_1m, self.t_long] if cols == 2 else small[:4]
+        key = (cols, len(show))
+        if key != self.cols:
+            self.cols = key
+            for t in small:
+                self.grid.removeWidget(t)
+                t.setVisible(t in show)
+            for i, t in enumerate(show):
+                self.grid.addWidget(t, i // cols, i % cols)
+        rows = math.ceil(len(show) / cols)
+        tiles_h = rows * (70 if h >= 520 else 52)
+        top_h = max(h - tiles_h - 20, 120)
+        self.main_tile.set_size(max(20, min(96, top_h * 0.13, w * 0.075)))
+        self.thumb.set_size(max(36, min(130, top_h * 0.22, w * 0.12)))
+        hist = self.main.cfg["meter_style"] == "history"
+        self.history.setVisible(hist and top_h > 200)
+        self.bar.setVisible(not hist or top_h <= 200)
+        for t in small:
+            t.set_size(max(11, min(22, w / cols / 14, h / 30)))
+            t.s.setVisible(h >= 420)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.reflow()
 
     def tiles(self):
         return [self.main_tile, self.t_1m, self.t_long, self.t_tot, self.t_clong,
@@ -1164,6 +1213,9 @@ class MeterPanel(QtWidgets.QWidget):
         hist = self.main.cfg["meter_style"] == "history"
         self.history.setVisible(hist)
         self.bar.setVisible(not hist)
+        if getattr(self, "grid", None) is not None:
+            self.cols = 0
+            self.reflow()
         self.banner.setStyleSheet(f"QPushButton {{ background:{T['banner']}; color:{T['red']}; border:1px solid "
                                   f"{T['red']}; font-weight:700; font-size:12pt; padding:8px; }}")
 
@@ -1188,9 +1240,10 @@ class RtaPanel(QtWidgets.QWidget):
         self.w = QtWidgets.QComboBox(); self.w.addItems(["Z", "A", "C"]); self.w.setCurrentText(c["rta_weight"])
         self.sp = QtWidgets.QComboBox(); self.sp.addItems(["Fast", "Slow", "Leq"])
         self.sp.setCurrentText({"F": "Fast", "S": "Slow", "Leq": "Leq"}[c["rta_speed"]])
-        rst = QtWidgets.QPushButton("Reset peaks / Leq")
+        rst = QtWidgets.QPushButton("Reset"); rst.setToolTip("Reset peak hold and the Leq average")
         rst.clicked.connect(self.reset)
-        self.spec = QtWidgets.QCheckBox("Spectrogram"); self.spec.setChecked(c["rta_spectro"])
+        self.spec = QtWidgets.QCheckBox("Spectro"); self.spec.setChecked(c["rta_spectro"])
+        self.spec.setToolTip("Show the scrolling spectrogram")
         self.spec.toggled.connect(self._spec_toggled)
         for lab, wdg in (("Weighting", self.w), ("Speed", self.sp)):
             row.addWidget(QtWidgets.QLabel(lab)); row.addWidget(wdg)
@@ -1276,6 +1329,7 @@ class DosePanel(QtWidgets.QWidget):
             bar = QtWidgets.QProgressBar(); bar.setRange(0, 1000); bar.setFormat("%v")
             bar.setTextVisible(True)
             info = QtWidgets.QLabel("")
+            info.setWordWrap(True)
             status = QtWidgets.QLabel("")
             g.addWidget(name, 0, 0); g.addWidget(status, 0, 1, QtCore.Qt.AlignRight)
             g.addWidget(desc, 1, 0, 1, 2)
@@ -2836,14 +2890,39 @@ ServiceSPL paints that button's text and color directly.</li>
 switcher. Needs the free NDI Tools/runtime installed. Tick “transparent background” for a key-able overlay.</li>
 <li><b>Web view</b>: shows the big number in any browser on the network; <code>/api/json</code> and <code>/api/level</code>
 give the numbers to other software.</li></ul>"""),
-    ("Planning Center", """<h2>Planning Center Services Live</h2>
-<ol><li>Create a Personal Access Token at <b>api.planningcenteronline.com/oauth/applications</b> (Personal Access
-Tokens → New). Copy the Application ID and Secret into the Planning Center panel and press Connect.</li>
-<li>Pick the service type and today's plan, then tick <b>Follow Live</b>.</li>
-<li>When someone advances Services Live, the current item shows in the panel, stamps every log row, and becomes an event.
-The panel and the PDF report show LAeq / LCeq / max / peak for every item, flagged red when an item's LAeq goes over
-the item target.</li></ol>
-<p>On a Mac the secret is kept in your Keychain.</p>"""),
+    ("Planning Center", """<h2>Planning Center Services Live: setup</h2>
+<p>ServiceSPL follows <b>Services Live</b>: whenever whoever runs Live advances to the next item, ServiceSPL starts a new
+item, stamps the log with it and keeps levels per item. One-time setup, about 3 minutes:</p>
+<h3>1 · Make a Personal Access Token (in your web browser)</h3>
+<ol><li>Sign in to Planning Center with an account that can <b>see the plans</b> you want to follow (Services
+<i>Viewer</i> or higher on that service type). The token gets the same access as that account.</li>
+<li>Open <b>https://api.planningcenteronline.com/oauth/applications</b> (or press <b>Open token page</b> in the panel).</li>
+<li>Scroll to <b>Personal Access Tokens</b> and click <b>New Personal Access Token</b>.</li>
+<li>Description: <code>ServiceSPL</code>. For the API version, keep the newest <b>Services</b> version offered. Click
+<b>Submit</b>.</li>
+<li>You'll see an <b>Application ID</b> and a <b>Secret</b>. Copy both now (keep the page open until step 2 works).</li></ol>
+<h3>2 · Connect ServiceSPL</h3>
+<ol><li>Show the panel: <b>View → Service · Planning Center Live</b>.</li>
+<li>Paste the <b>Application ID</b> into the first box and the <b>Secret</b> into the second, then press <b>Connect</b>.
+The status line should say <i>Connected · N service types</i>. On a Mac the secret goes into your Keychain, so you only do
+this once.</li>
+<li>Pick the <b>service type</b> (e.g. "Sunday Services") in the left drop-down. The right drop-down lists recent and
+upcoming plans; today's plan is picked for you.</li>
+<li>Set <b>Item target LAeq</b>: an item whose average goes over this turns red and raises an alarm (95 dB is a common
+worship target).</li></ol>
+<h3>3 · On the day</h3>
+<ol><li>Start the meter (and logging, or let the <b>Schedule</b> do it).</li>
+<li>Tick <b>Follow Live</b>. The status line says <i>Following Live: …</i>.</li>
+<li>Someone opens <b>Services Live</b> for that plan, <b>takes control</b> and advances items as the service goes.
+ServiceSPL checks every 3 seconds; <b>Now: …</b> shows the current item and its running LAeq.</li>
+<li>Afterwards the panel table and the PDF report list LAeq / LCeq / LAFmax / LCpeak for every item.</li></ol>
+<h3>If it doesn't work</h3>
+<ul><li><b>401 / Unauthorized</b>: the ID or secret is wrong or the token was revoked. Make a new token.</li>
+<li><b>Connected, but no service types or plans</b>: the account behind the token can't see them. Give it Viewer access.</li>
+<li><b>Following, but the item never changes</b>: nobody has taken control in Services Live, or a different plan is
+selected. Check the date in the plan drop-down.</li>
+<li><b>Couldn't connect / timed out</b>: the Mac needs internet access to api.planningcenteronline.com.</li>
+<li>No Planning Center at all? <b>Start item manually…</b> does the same with names you type.</li></ul>"""),
 ]
 
 
@@ -3039,6 +3118,11 @@ class PcoPanel(QtWidgets.QWidget):
         self.secret.setPlaceholderText("Secret")
         self.secret.setText(secret_get("pco") or c.get("pco_secret", ""))
         con = QtWidgets.QPushButton("Connect"); con.clicked.connect(self.connect_pco)
+        tok = QtWidgets.QPushButton("Open token page")
+        tok.setToolTip("Create a Personal Access Token in your browser")
+        tok.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl("https://api.planningcenteronline.com/oauth/applications")))
+        hlp = QtWidgets.QPushButton("? Setup help"); hlp.clicked.connect(lambda: main.guide("Planning Center"))
         self.st = QtWidgets.QComboBox(); self.plan = QtWidgets.QComboBox()
         self.st.currentIndexChanged.connect(self.load_plans)
         self.follow = QtWidgets.QCheckBox("Follow Live"); self.follow.toggled.connect(self.toggle_follow)
@@ -3047,7 +3131,9 @@ class PcoPanel(QtWidgets.QWidget):
         self.target.valueChanged.connect(lambda x: c.__setitem__("pco_target", x))
         g.addWidget(self.app_id, 0, 0); g.addWidget(self.secret, 0, 1); g.addWidget(con, 0, 2)
         g.addWidget(self.st, 1, 0); g.addWidget(self.plan, 1, 1); g.addWidget(self.follow, 1, 2)
-        g.addWidget(self.target, 2, 0, 1, 2)
+        g.addWidget(self.target, 2, 0)
+        hb = QtWidgets.QHBoxLayout(); hb.addWidget(tok); hb.addWidget(hlp)
+        g.addLayout(hb, 2, 1, 1, 2)
         v.addLayout(g)
         self.status = QtWidgets.QLabel("Not connected")
         self.now = QtWidgets.QLabel("—")
@@ -3085,7 +3171,8 @@ class PcoPanel(QtWidgets.QWidget):
         try:
             sts = self.client.service_types()
         except Exception as e:
-            self.status.setText(f"Couldn't connect: {e}")
+            hint = " (check the Application ID and Secret)" if "401" in str(e) else ""
+            self.status.setText(f"Couldn't connect: {e}{hint}")
             return
         self.st.blockSignals(True); self.st.clear()
         for i, n in sts:
@@ -3609,13 +3696,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- UI
     def _build_ui(self):
         tb = QtWidgets.QToolBar("Main"); tb.setObjectName("toolbar"); tb.setMovable(False); self.addToolBar(tb)
-        self.dev = QtWidgets.QComboBox(); self.dev.setMinimumWidth(220)
+        self.dev = QtWidgets.QComboBox(); self.dev.setMinimumWidth(150)
+        self.dev.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.dev.setMinimumContentsLength(16)
         self.ch = QtWidgets.QComboBox(); self.ch.setMinimumWidth(80)
         self.dev.currentIndexChanged.connect(self.fill_channels)
         self.dev.currentIndexChanged.connect(self.auto_profile)
         self.run_btn = QtWidgets.QPushButton("▶  Start"); self.run_btn.setCheckable(True)
         self.run_btn.clicked.connect(self.toggle_run)
-        self.prof_cb = QtWidgets.QComboBox(); self.prof_cb.setMinimumWidth(140)
+        self.prof_cb = QtWidgets.QComboBox(); self.prof_cb.setMinimumWidth(110)
+        self.prof_cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.prof_cb.setMinimumContentsLength(10)
         self.prof_cb.setToolTip("Mic profile (calibration)")
         self.prof_cb.activated.connect(lambda i: self.set_profile(self.prof_cb.itemText(i)))
         cal = QtWidgets.QPushButton("Calibrate…"); cal.clicked.connect(self.calibrate)
@@ -3678,7 +3769,12 @@ class MainWindow(QtWidgets.QMainWindow):
                                       QtCore.Qt.BottomDockWidgetArea)):
             d = QtWidgets.QDockWidget(title, self)
             d.setObjectName("dock_" + name)
-            d.setWidget(w)
+            sc = QtWidgets.QScrollArea()          # panels scroll instead of forcing the window bigger
+            sc.setWidgetResizable(True)
+            sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+            sc.setWidget(w)
+            sc.setMinimumSize(200, 80)
+            d.setWidget(sc)
             d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetClosable
                           | QtWidgets.QDockWidget.DockWidgetFloatable)
             self.addDockWidget(area, d)
@@ -3687,7 +3783,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabifyDockWidget(self.docks["dose"], self.docks["theater"])
         self.docks["dose"].raise_()
         self.splitDockWidget(self.docks["session"], self.docks["pco"], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["session"], self.docks["pco"]], [900, 450], QtCore.Qt.Horizontal)
+        if not self.cfg.get("dock_state"):
+            QtCore.QTimer.singleShot(0, self.default_dock_sizes)
 
         mb = self.menuBar()
         fm = mb.addMenu("&File")
@@ -3703,6 +3800,8 @@ class MainWindow(QtWidgets.QMainWindow):
         vm.addAction("Show all panels", lambda: [d.show() for d in self.docks.values()])
         vm.addAction("Hide all panels", lambda: [d.hide() for d in self.docks.values()])
         vm.addAction("Mini meter", self.enter_mini)
+        vm.addAction("Quarter-screen size", self.quarter_size)
+        vm.addAction("Fit to screen", lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))
         tm = mb.addMenu("&Tools")
         tm.addAction("Calibration wizard…", self.calibrate)
         tm.addAction("Drop marker", lambda: self.add_marker(), QtGui.QKeySequence("M"))
@@ -3722,15 +3821,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.apply_cfg_to_ui()
 
     def restore_layout(self):
+        scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
         try:
             if self.cfg.get("win_geom"):
                 self.restoreGeometry(QtCore.QByteArray(base64.b64decode(self.cfg["win_geom"])))
             else:
-                self.resize(1500, 900)
+                self.resize(int(scr.width() * 0.85), int(scr.height() * 0.85))
+                self.move(scr.center() - self.rect().center())
             if self.cfg.get("dock_state"):
                 self.restoreState(QtCore.QByteArray(base64.b64decode(self.cfg["dock_state"])))
         except Exception:
-            self.resize(1500, 900)
+            self.resize(int(scr.width() * 0.85), int(scr.height() * 0.85))
+        self.fit_to_screen()
+
+    def default_dock_sizes(self):
+        w, h = self.width(), self.height()
+        self.resizeDocks([self.docks["rta"]], [int(w * 0.32)], QtCore.Qt.Horizontal)
+        self.resizeDocks([self.docks["session"], self.docks["pco"]], [int(w * 0.62), int(w * 0.38)], QtCore.Qt.Horizontal)
+        self.resizeDocks([self.docks["rta"], self.docks["dose"]], [int(h * 0.5), int(h * 0.4)], QtCore.Qt.Vertical)
+        self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
+
+    def quarter_size(self):
+        """Half the screen's width and height (1/4 of its area), parked top-right."""
+        scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
+        self.showNormal()
+        self.resize(scr.width() // 2, scr.height() // 2)
+        self.move(scr.right() - self.frameGeometry().width() + 1, scr.top())
+
+    def fit_to_screen(self):
+        """Never open taller or wider than the screen (e.g. after moving from a bigger display)."""
+        scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
+        g = self.frameGeometry()
+        w, h = min(g.width(), scr.width()), min(g.height(), scr.height())
+        if (w, h) != (g.width(), g.height()):
+            self.resize(w - (g.width() - self.width()), h - (g.height() - self.height()))
+        g = self.frameGeometry()
+        x = min(max(g.left(), scr.left()), scr.right() - g.width() + 1)
+        y = min(max(g.top(), scr.top()), scr.bottom() - g.height() + 1)
+        self.move(x, y)
 
     def refresh_profiles(self):
         self.prof_cb.blockSignals(True)
