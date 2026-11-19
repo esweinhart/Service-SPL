@@ -10,6 +10,12 @@ on:
 permissions:
   contents: write
 
+# One build per branch at a time: a newer push cancels the older run, so two runs never
+# delete and re-create the same release at once (that race made a release job fail).
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # GitHub's Apple Silicon build machines are not available to this account
   # (jobs are never picked up), so build a Universal app (runs natively on
