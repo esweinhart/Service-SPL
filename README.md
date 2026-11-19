@@ -75,7 +75,7 @@ itself.
 | Method | When | What happens |
 |---|---|---|
 | **Acoustic calibrator** | Best accuracy, any mic | Seat a 94 or 114 dB calibrator (1 kHz or 250 Hz), wait for *steady*, press **Measure (5 s)**. Measured unweighted, so it works with either frequency. |
-| **Mic calibration file** | USB mics like miniDSP UMIK-1 / UMIK-2, or any REW-style `.txt` | Loads the frequency-response correction (applied as a linear-phase FIR to everything: meter, RTA, logs). If the file has a `Sens Factor`, the absolute level is set from it too. |
+| **Mic calibration file** | USB mics like miniDSP UMIK-1 / UMIK-2, analog measurement mics like the **Audix TM1**, Dayton EMM-6, or any REW-style `.txt` / `.cal` / `.frd` / `.csv` | Loads the frequency-response correction (applied as a linear-phase FIR to everything: meter, RTA, logs). If the file has a `Sens Factor` (UMIK), the absolute level is set from it too. |
 | **Manual** | You know the numbers | Either "0 dBFS sine = X dB SPL", or mic sensitivity (mV/Pa) + preamp gain + interface dBu at 0 dBFS. |
 
 **UMIK tips**
@@ -84,6 +84,14 @@ itself.
 - For the Sens Factor to be right, the Mac's input volume for the UMIK must be at **100 %** (Audio MIDI Setup →
   UMIK → Input → volume all the way up). Set the format to 48 kHz while you're there.
 - A cal file plus a quick calibrator check afterwards is the gold standard.
+
+**Audix TM1 (and other analog mics)**
+- In Calibrate…, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
+  sensitivity are read from it, and the profile is named after the mic (e.g. "TM1 #210345").
+- Analog mics have no Sens Factor, because the level depends on your preamp gain. So the file fixes the *frequency
+  response*, and then you set the *absolute level* with the **acoustic calibrator** step on the same profile. Do the
+  calibrator step again whenever you change the preamp gain.
+- Phantom power on, and keep the preamp gain where you'll leave it for the service.
 
 After any gain change on an analog mic/interface, **recalibrate**. The status bar shows the active profile, how it was
 calibrated, and turns yellow when the calibration is more than 30 days old.
@@ -299,8 +307,23 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 ---
 
 ## 11. Files and data
+
+### Back up / move your settings (File → Export settings… / Import settings…)
+Everything goes in one `.servicespl.json` file: every mic profile (with its calibration offset **and** the cal-file
+curve, so you don't need the original file again), meter and alarm settings, theme, panel layout and window size,
+Companion, NDI, web view, the logging schedule, the OneDrive / auto-save folder and Planning Center.
+
+- **Updating the app:** you don't need to do anything. Settings live outside the app (below), so dragging a new
+  ServiceSPL into Applications keeps them. Exporting first is a cheap safety net.
+- **New Mac, or a second booth computer:** Export on the old one, Import on the new one. The app restarts with
+  everything loaded.
+- **Planning Center secret:** Export asks whether to include it. If you say yes, the file contains a password-like
+  secret, so keep it private (don't email it around or leave it on a shared drive). If you say no, paste the secret
+  again after importing.
+- After updating, macOS may ask for **microphone** permission again, because each build is signed fresh. Click Allow.
+
 - Settings and mic profiles: `~/Library/Application Support/ServiceSPL/config.json` (Mac),
   `%APPDATA%\ServiceSPL\config.json` (Windows). On first launch, settings from the old `SPLMonitor` folder are read in. The Planning Center secret is in the macOS Keychain.
 - Logs: `Documents/SPL Logs` by default, or the auto-save folder.
 - Tests: `python tests/test_iec61672.py` (weighting, time weighting, Leq, peak) and `python tests/test_engine.py`
-  (true peak, RTA, cal files, dose, pink noise, Ln, EQ, OSC, schedule). Both run in CI before every Mac build.
+  (true peak, RTA, cal files incl. TM1/CSV/decimal-comma formats, dose, pink noise, Ln, EQ, OSC, schedule, settings backup). Both run in CI before every Mac build.

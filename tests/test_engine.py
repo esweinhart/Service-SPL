@@ -1,5 +1,5 @@
 """Engine feature checks: true peak, RTA, cal files, dosimeter, pink noise, Ln (run: python tests/test_engine.py)."""
-import math, os, sys, tempfile
+import json, math, os, sys, tempfile
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -133,8 +133,58 @@ def test_eq_and_osc():
     ok("schedule: one-off date", sm.schedule_window(dict(e, date="2026-11-24"), datetime.datetime(2026, 11, 24, 10, 0)))
 
 
+def test_cal_formats():
+    cases = {
+        "Audix TM1 style": ("Audix TM1 Measurement Microphone\nSerial Number: 210345\nSensitivity: 9.6 mV/Pa\n"
+                            "Freq(Hz)\tdB\n20\t-0.8\n100\t-0.1\n1000\t0.0\n10000\t0.9\n20000\t-1.2\n"),
+        "CSV with header": "Frequency,Response\n20,-0.8\n100,-0.1\n1000,0.0\n10000,0.9\n20000,-1.2\n",
+        "decimal commas": "20,0;-0,8\n100,0;-0,1\n1000,0;0,0\n10000,0;0,9\n20000,0;-1,2\n",
+        "tab + decimal commas": "20,0\t-0,8\n100\t-0,1\n1000\t0,0\n10000\t0,9\n20000\t-1,2\n",
+        "absolute SPL, reversed": "20000 92.8\n10000 94.9\n1000 94.0\n100 93.9\n20 93.2\n",
+        "CRLF + BOM": "\ufeff20 -0.8\r\n100 -0.1\r\n1000 0.0\r\n10000 0.9\r\n20000 -1.2\r\n",
+    }
+    for name, txt in cases.items():
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(txt)
+        d = sm.parse_cal_file(f.name)
+        g = dict((round(p[0]), round(p[1], 2)) for p in d["points"])
+        okv = len(d["points"]) == 5 and g.get(1000) == 0.0 and g.get(10000) == 0.9 and g.get(20) == -0.8
+        ok(f"cal file format: {name}", okv, str(d["points"]))
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write(cases["Audix TM1 style"])
+    d = sm.parse_cal_file(f.name)
+    ok("TM1: model, serial, mV/Pa", d["model"] == "TM1" and d["serial"] == "210345" and abs(d["mv_pa"] - 9.6) < 1e-9,
+       f"{d['model']} {d['serial']} {d['mv_pa']}")
+
+
+def test_settings_backup():
+    from PySide6 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    d = tempfile.mkdtemp()
+    sm.CFG_DIR, sm.CFG_PATH = d, os.path.join(d, "config.json")
+    sm.OLD_CFG_PATH = os.path.join(d, "none.json")
+    w = sm.MainWindow()
+    w.cfg["profiles"]["TM1 #210345"] = dict(sm.DEFAULTS["profiles"]["Default"], offset=101.5, calibrated=True,
+                                           cal_points=[[20, -0.8], [1000, 0.0], [20000, -1.2]])
+    w.cfg["alarm"], w.cfg["companion_port"], w.cfg["pco_secret"] = 97.0, 4444, "s3cret"
+    path = os.path.join(d, "backup.servicespl.json")
+    w.export_settings(path, include_secret=False)
+    data = json.load(open(path))
+    ok("backup: no secret unless asked", data["secrets"] == {} and "pco_secret" not in data["settings"])
+    w.cfg["alarm"] = 80.0
+    w.cfg["profiles"].pop("TM1 #210345")
+    ok("backup: import", w.import_settings(path, confirm=False, restart=False))
+    c = json.load(open(sm.CFG_PATH))
+    ok("backup: restores profiles + cal curve + settings",
+       c["profiles"]["TM1 #210345"]["offset"] == 101.5 and c["profiles"]["TM1 #210345"]["cal_points"][1] == [1000, 0.0]
+       and c["alarm"] == 97.0 and c["companion_port"] == 4444 and c.get("dock_state"), str(c["alarm"]))
+    w._imported = False
+    w.close()
+
+
 if __name__ == "__main__":
-    for t in (test_true_peak, test_rta, test_cal_file, test_dose, test_pink, test_ln, test_eq_and_osc):
+    for t in (test_true_peak, test_rta, test_cal_file, test_dose, test_pink, test_ln, test_eq_and_osc,
+              test_cal_formats, test_settings_backup):
         print(t.__name__)
         t()
     print("All engine checks passed.")

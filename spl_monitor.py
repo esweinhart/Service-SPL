@@ -117,34 +117,76 @@ class TruePeak:
         return float(np.max(y * y)) if len(y) else 0.0
 
 
+def _num(tok):
+    return float(tok.replace(",", ".")) if re.fullmatch(r"[-+]?\d+,\d+", tok) else float(tok)
+
+
 def parse_cal_file(path):
-    """Read a UMIK / REW-style mic calibration file.
-    Header like:  "Sens Factor =-0.7716dB, AGain =18dB, SERNO: 7023270"
-    Data lines:   <freq Hz> <gain dB> [phase]  (space, tab or comma separated)."""
-    pts, sens, serial, again = [], None, "", None
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            s = line.strip().strip('"').strip()
-            m = re.search(r"Sens\s*Factor\s*=\s*([-+]?\d+(?:\.\d+)?)", s, re.I)
-            if m:
-                sens = float(m.group(1))
-            m = re.search(r"SERNO\s*:\s*([\w-]+)", s, re.I)
-            if m:
-                serial = m.group(1)
-            m = re.search(r"AGain\s*=\s*([-+]?\d+(?:\.\d+)?)", s, re.I)
-            if m:
-                again = float(m.group(1))
-            if s and (s[0].isdigit() or (s[0] in "+-." and len(s) > 1 and (s[1].isdigit() or s[1] == "."))):
-                tok = [t for t in re.split(r"[\s,;]+", s) if t]
-                try:
-                    fr, g = float(tok[0]), float(tok[1])
-                except (ValueError, IndexError):
-                    continue
-                if fr > 0 and (not pts or fr > pts[-1][0]):
-                    pts.append([fr, g])
+    """Read a microphone calibration file.
+    Works with UMIK / UMM-6 (miniDSP), REW .cal/.frd, Audix TM1 (and other analog measurement mics), Dayton EMM-6
+    and plain CSV exports.
+    Header examples:  "Sens Factor =-0.7716dB, AGain =18dB, SERNO: 7023270"   (UMIK)
+                      "Audix TM1  Serial: 12345  Sensitivity: 9.4 mV/Pa"       (TM1 / analog mics)
+    Data lines:       <freq Hz> <dB> [phase], separated by spaces, tabs, commas or semicolons
+                      (European decimal commas like "1000,0;-0,25" are fine too)."""
+    pts, sens, serial, again, mv_pa, model = [], None, "", None, None, ""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        lines = f.read().replace("\r", "\n").split("\n")
+    for line in lines:
+        s = line.strip().strip('"').strip()
+        if not s:
+            continue
+        m = re.search(r"Sens\s*Factor\s*=\s*([-+]?\d+(?:\.\d+)?)", s, re.I)
+        if m:
+            sens = float(m.group(1))
+        m = re.search(r"(?:SERNO|S/N|SN|Serial(?:\s*(?:No\.?|Number|#))?)\s*[:#=]?\s*#?\s*([A-Za-z0-9][\w-]*)", s, re.I)
+        if m and not serial and not s[0].isdigit():
+            serial = m.group(1)
+        m = re.search(r"AGain\s*=\s*([-+]?\d+(?:\.\d+)?)", s, re.I)
+        if m:
+            again = float(m.group(1))
+        m = re.search(r"([-+]?\d+(?:[.,]\d+)?)\s*mV\s*/\s*Pa", s, re.I)
+        if m:
+            mv_pa = _num(m.group(1))
+        else:
+            m = re.search(r"([-+]?\d+(?:[.,]\d+)?)\s*dBV(?:\s*/\s*Pa|\s*re\.?\s*1\s*V\s*/\s*Pa)?", s, re.I)
+            if m and "sens" in s.lower():
+                mv_pa = 1000 * 10 ** (_num(m.group(1)) / 20)
+        m = re.search(r"\b(TM-?1|TM-?2|M-?\d{2,}|EMM-?6|UMIK-?\d|UMM-?6|ECM-?8000|M30|M50|8030|M23|M2211|M2230|C-?\d+)\b",
+                      s, re.I)
+        if m and not model:
+            model = m.group(1).upper()
+        first = s[0]
+        if first.isdigit() or (first in "+-." and len(s) > 1 and (s[1].isdigit() or s[1] in ".,")):
+            if ";" in s:
+                tok = [t for t in re.split(r"[;\s]+", s) if t]
+            elif "\t" in s or re.search(r"\d,\d+\s+[-+]?\d", s):
+                tok = [t for t in re.split(r"[\t ]+", s) if t]
+            else:
+                tok = [t for t in re.split(r"[\s,]+", s) if t]
+            try:
+                fr, g = _num(tok[0]), _num(tok[1])
+            except (ValueError, IndexError):
+                continue
+            if fr > 0 and math.isfinite(g):
+                pts.append([fr, g])
     if len(pts) < 2:
         raise ValueError("No frequency / dB pairs found in that file.")
-    return dict(points=pts, sens_factor=sens, serial=serial, again=again, name=os.path.basename(path))
+    pts.sort(key=lambda p: p[0])
+    uniq = []
+    for p in pts:                       # drop repeated frequencies
+        if not uniq or p[0] > uniq[-1][0]:
+            uniq.append(p)
+    pts = uniq
+    if len(pts) < 2:
+        raise ValueError("No frequency / dB pairs found in that file.")
+    # Some files give the absolute response (e.g. 94.1 dB) instead of a deviation: make it relative to 1 kHz.
+    g = np.array([p[1] for p in pts])
+    if np.median(np.abs(g)) > 30:
+        ref = float(np.interp(3.0, np.log10([p[0] for p in pts]), g))
+        pts = [[p[0], p[1] - ref] for p in pts]
+    return dict(points=pts, sens_factor=sens, serial=serial, again=again, mv_pa=mv_pa, model=model,
+                name=os.path.basename(path))
 
 
 class CalFilter:
@@ -1007,6 +1049,8 @@ class HistoryStrip(QtWidgets.QWidget):
         p.drawText(r.adjusted(6, 2, 0, 0), QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop, "— LAeq 1 min")
 
 
+# The hand's visual weight sits low (the palm and fist are below the thumb), so lift it a little for optical centering.
+THUMB_NUDGE = "translate(1 -5)"
 THUMB_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
 <circle cx="50" cy="50" r="48" fill="{bg}"/>
 <g transform="{xf}" fill="#ffffff">
@@ -1028,8 +1072,8 @@ class Thumb(QtWidgets.QWidget):
         super().__init__()
         self.setFixedSize(size, size)
         self.r = {k: QtSvg.QSvgRenderer(QtCore.QByteArray(THUMB_SVG.format(bg=bg, xf=xf).encode()))
-                  for k, bg, xf in (("good", "#2ea866", ""), ("bad", "#e03b3b", "rotate(180 50 50)"),
-                                    ("off", "#8a9099", ""))}
+                  for k, bg, xf in (("good", "#2ea866", THUMB_NUDGE), ("bad", "#e03b3b", "rotate(180 50 50) " + THUMB_NUDGE),
+                                    ("off", "#8a9099", THUMB_NUDGE))}
         self.state = "off"
 
     def set_size(self, px):
@@ -2287,13 +2331,16 @@ class CalWizard(QtWidgets.QDialog):
         self.f_info.setText(f"{len(pts)} points, {pts[0, 0]:.0f} Hz – {pts[-1, 0]:.0f} Hz, "
                             f"correction {pts[:, 1].min():+.1f} to {pts[:, 1].max():+.1f} dB"
                             + (f"<br>Sens Factor {d['sens_factor']:+.3f} dB" if d["sens_factor"] is not None else
-                               "<br>No Sens Factor in this file: absolute level stays as is (use a calibrator).")
+                               (f"<br>{d.get('model') or 'Mic'} sensitivity {d['mv_pa']:.2f} mV/Pa. This is an analog mic, so "
+                                "the absolute level depends on your preamp gain: finish with the 94 dB calibrator step."
+                                if d.get("mv_pa") else
+                                "<br>No Sens Factor in this file: absolute level stays as is (use a calibrator)."))
                             + (f" · serial {d['serial']}" if d["serial"] else "")
                             + (f" · AGain {d['again']:g} dB" if d["again"] is not None else ""))
         self.f_sens.setEnabled(d["sens_factor"] is not None)
         self.f_sens.setChecked(d["sens_factor"] is not None)
-        if self.p_new.isChecked() and not self.p_name.text().strip() and d["serial"]:
-            self.p_name.setText(f"Mic #{d['serial']}")
+        if self.p_new.isChecked() and not self.p_name.text().strip() and (d["serial"] or d.get("model")):
+            self.p_name.setText(" ".join(x for x in (d.get("model") or "Mic", f"#{d['serial']}" if d["serial"] else "") if x))
         self.draw_curve(pts)
 
     def draw_curve(self, pts):
@@ -2875,7 +2922,8 @@ def paint_meter_card(p, r, d, transparent=False):
     ts = H * 0.5
     st = d.get("state", "off")
     if st not in _THUMB_RENDER:
-        bg, xf = {"good": ("#2ea866", ""), "bad": ("#e03b3b", "rotate(180 50 50)")}.get(st, ("#8a9099", ""))
+        bg, xf = {"good": ("#2ea866", THUMB_NUDGE), "bad": ("#e03b3b", "rotate(180 50 50) " + THUMB_NUDGE)}.get(
+            st, ("#8a9099", THUMB_NUDGE))
         _THUMB_RENDER[st] = QtSvg.QSvgRenderer(QtCore.QByteArray(THUMB_SVG.format(bg=bg, xf=xf).encode()))
     _THUMB_RENDER[st].render(p, QtCore.QRectF(r.left() + pad, r.top() + (H - ts) / 2 - H * 0.05, ts, ts))
     f = QtGui.QFont("Menlo"); f.setStyleHint(QtGui.QFont.Monospace); f.setBold(True); f.setPixelSize(int(H * 0.42))
@@ -3497,12 +3545,12 @@ html,body{margin:0;height:100%;background:#121417;color:#e8e8e8;
 </style></head><body>
 <div id="wrap"><div id="thumb"></div><div id="right"><div id="val">--.-</div><div id="sub">connecting…</div></div></div>
 <script>
-const SVG=__SVG__;
+const SVG=__SVG__, NUDGE=__NUDGE__;
 const BG={good:"#2ea866",bad:"#e03b3b",off:"#3a3f47"};
 let last="";
 function thumb(st){if(st===last)return;last=st;
  document.getElementById("thumb").innerHTML=SVG.replaceAll("{bg}",BG[st])
-  .replaceAll("{xf}",st==="bad"?"rotate(180 50 50)":"").replace("<svg ","<svg height='100%' ");}
+  .replaceAll("{xf}",(st==="bad"?"rotate(180 50 50) ":"")+NUDGE).replace("<svg ","<svg height='100%' ");}
 async function poll(){
  try{const r=await fetch("/data",{cache:"no-store"});const d=await r.json();
   const v=document.getElementById("val");
@@ -3520,7 +3568,7 @@ class WebView:
     def __init__(self, port):
         self.state = {"value": None, "color": "#e8e8e8", "state": "off", "sub": "stopped"}
         self.api = {}
-        page = WEB_PAGE.replace("__SVG__", json.dumps(THUMB_SVG)).encode()
+        page = WEB_PAGE.replace("__SVG__", json.dumps(THUMB_SVG)).replace("__NUDGE__", json.dumps(THUMB_NUDGE)).encode()
         view = self
 
         class H(BaseHTTPRequestHandler):
@@ -3806,6 +3854,27 @@ def write_pdf_report(path, sess, cfg, profile_name, prof, plan_label=""):
 
 # ---------------------------------------------------------- main window ---
 
+def merge_cfg(saved):
+    """DEFAULTS + a saved / imported config (handles v1 configs)."""
+    cfg = copy.deepcopy(DEFAULTS)
+    if saved and "profiles" not in saved:      # v1 config: turn the single calibration into a profile
+        saved["profiles"] = {"Default": dict(DEFAULTS["profiles"]["Default"],
+                                             offset=saved.get("cal_offset", 120.0),
+                                             calibrated=saved.get("calibrated", False),
+                                             cal_info=saved.get("cal_info", ""),
+                                             method="calibrator" if saved.get("calibrated") else "")}
+    for k in ("cal_offset", "calibrated", "cal_info"):
+        saved.pop(k, None)
+    cfg.update(saved)
+    for k in ("theater",):
+        merged = copy.deepcopy(DEFAULTS[k]); merged.update(cfg.get(k) or {}); cfg[k] = merged
+    if cfg["profile"] not in cfg["profiles"]:
+        cfg["profile"] = next(iter(cfg["profiles"]))
+    return cfg
+
+BACKUP_KIND = "ServiceSPL settings backup"
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3854,7 +3923,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- config
     def load_cfg(self):
-        cfg = copy.deepcopy(DEFAULTS)
         saved = {}
         for path in (CFG_PATH, OLD_CFG_PATH):      # carry settings + mic profiles over from SPL Monitor
             try:
@@ -3863,20 +3931,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 break
             except Exception:
                 continue
-        if saved and "profiles" not in saved:      # v1 config: turn the single calibration into a profile
-            saved["profiles"] = {"Default": dict(DEFAULTS["profiles"]["Default"],
-                                                 offset=saved.get("cal_offset", 120.0),
-                                                 calibrated=saved.get("calibrated", False),
-                                                 cal_info=saved.get("cal_info", ""),
-                                                 method="calibrator" if saved.get("calibrated") else "")}
-        for k in ("cal_offset", "calibrated", "cal_info"):
-            saved.pop(k, None)
-        cfg.update(saved)
-        for k in ("theater",):
-            merged = copy.deepcopy(DEFAULTS[k]); merged.update(cfg.get(k) or {}); cfg[k] = merged
-        if cfg["profile"] not in cfg["profiles"]:
-            cfg["profile"] = next(iter(cfg["profiles"]))
-        return cfg
+        return merge_cfg(saved)
 
     def save_cfg(self):
         try:
@@ -3890,6 +3945,96 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def active_profile(self):
         return self.cfg["profiles"][self.cfg["profile"]]
+
+    # ---------- settings backup
+    def export_settings(self, path=None, include_secret=None):
+        """Write every setting (mic profiles with their cal curves, layout, integrations...) to one file."""
+        if path is None:
+            stamp = datetime.date.today().isoformat()
+            default = os.path.join(os.path.expanduser("~/Desktop"), f"ServiceSPL settings {stamp}.servicespl.json")
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export settings", default,
+                                                            "ServiceSPL settings (*.servicespl.json *.json)")
+            if not path:
+                return None
+        secret = secret_get("pco") or self.cfg.get("pco_secret", "")
+        if include_secret is None:
+            include_secret = False
+            if secret:
+                r = QtWidgets.QMessageBox.question(
+                    self, "Include the Planning Center secret?",
+                    "Include your Planning Center secret in the file?\n\nYes: importing restores the PCO "
+                    "connection too, but anyone with the file can read your Planning Center data. Keep it somewhere "
+                    "private.\nNo: you'll paste the secret again after importing.",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+                include_secret = r == QtWidgets.QMessageBox.Yes
+        self.cfg["win_geom"] = base64.b64encode(bytes(self.saveGeometry())).decode()
+        self.cfg["dock_state"] = base64.b64encode(bytes(self.saveState())).decode()
+        settings = copy.deepcopy(self.cfg)
+        settings.pop("pco_secret", None)
+        data = {"kind": BACKUP_KIND, "app_version": APP_VERSION, "format": 1,
+                "exported": datetime.datetime.now().isoformat(timespec="seconds"),
+                "settings": settings, "secrets": {"pco": secret} if include_secret and secret else {}}
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except OSError as ex:
+            QtWidgets.QMessageBox.warning(self, "Export settings", f"Couldn't write the file:\n{ex}")
+            return None
+        n = len(self.cfg["profiles"])
+        self.status.showMessage(f"Settings exported ({n} mic profile{'s' if n != 1 else ''}"
+                                f"{', with PCO secret' if data['secrets'] else ''}) to {path}", 8000)
+        return path
+
+    def import_settings(self, path=None, confirm=True, restart=True):
+        if path is None:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import settings", os.path.expanduser("~/Desktop"),
+                                                            "ServiceSPL settings (*.servicespl.json *.json);;All files (*)")
+            if not path:
+                return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("kind") == BACKUP_KIND:
+                saved, secrets = data.get("settings") or {}, data.get("secrets") or {}
+            elif isinstance(data, dict) and ("profiles" in data or "alarm" in data):
+                saved, secrets = data, {}          # a raw config.json works too
+            else:
+                raise ValueError("This isn't a ServiceSPL settings file.")
+            cfg = merge_cfg(saved)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Import settings", f"Couldn't read that file:\n{ex}")
+            return False
+        if confirm:
+            profs = ", ".join(cfg["profiles"])
+            r = QtWidgets.QMessageBox.question(
+                self, "Import settings",
+                f"Replace all current settings with the ones in this file?\n\nMic profiles: {profs}\n"
+                f"Exported {data.get('exported', 'from a config file')}"
+                + (" · includes the Planning Center secret" if secrets.get("pco") else "")
+                + "\n\nServiceSPL restarts to load them.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.Yes)
+            if r != QtWidgets.QMessageBox.Yes:
+                return False
+        if secrets.get("pco"):
+            if not secret_set("pco", secrets["pco"]):
+                cfg["pco_secret"] = secrets["pco"]
+        self.cfg = cfg
+        self.save_cfg()
+        self._imported = True                     # don't overwrite the imported file on the way out
+        if restart:
+            self.restart_app()
+        return True
+
+    def restart_app(self):
+        if getattr(sys, "frozen", False):
+            exe = sys.executable
+            if sys.platform == "darwin" and ".app/Contents/MacOS/" in exe:
+                QtCore.QProcess.startDetached("/bin/sh", ["-c", f'sleep 1; open -n "{exe.split(".app/")[0]}.app"'])
+            else:
+                QtCore.QProcess.startDetached(exe, sys.argv[1:])
+        else:
+            QtCore.QProcess.startDetached(sys.executable, [os.path.abspath(sys.argv[0])] + sys.argv[1:])
+        self.close()
 
     # ---------- theme
     def apply_theme(self):
@@ -4039,6 +4184,9 @@ class MainWindow(QtWidgets.QMainWindow):
         fm.addAction("Export session CSV…", lambda: self.export_csv())
         fm.addAction("Export PDF report…", lambda: self.export_pdf())
         fm.addAction("New session", lambda: self.new_session())
+        fm.addSeparator()
+        fm.addAction("Export settings…", lambda: self.export_settings())
+        fm.addAction("Import settings…", lambda: self.import_settings())
         fm.addSeparator()
         fm.addAction("Settings…", self.settings)
         vm = mb.addMenu("&View")
@@ -4798,9 +4946,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.menubar_meter.remove()
         if self.log_file:
             self.log_file.close()
-        self.cfg["win_geom"] = base64.b64encode(bytes(self.saveGeometry())).decode()
-        self.cfg["dock_state"] = base64.b64encode(bytes(self.saveState())).decode()
-        self.save_cfg()
+        if not getattr(self, "_imported", False):
+            self.cfg["win_geom"] = base64.b64encode(bytes(self.saveGeometry())).decode()
+            self.cfg["dock_state"] = base64.b64encode(bytes(self.saveState())).decode()
+            self.save_cfg()
         super().closeEvent(ev)
         QtWidgets.QApplication.quit()
 
