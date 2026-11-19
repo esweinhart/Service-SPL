@@ -76,6 +76,7 @@ itself.
 |---|---|---|
 | **Acoustic calibrator** | Best accuracy, any mic | Seat a 94 or 114 dB calibrator (1 kHz or 250 Hz), wait for *steady*, press **Measure (5 s)**. Measured unweighted, so it works with either frequency. |
 | **Mic calibration file** | USB mics like miniDSP UMIK-1 / UMIK-2, analog measurement mics like the **Audix TM1**, Dayton EMM-6, or any REW-style `.txt` / `.cal` / `.frd` / `.csv` | Loads the frequency-response correction (applied as a linear-phase FIR to everything: meter, RTA, logs). If the file has a `Sens Factor` (UMIK), the absolute level is set from it too. |
+| **Match a reference SPL meter** | No calibrator, but you have a trusted handheld meter | Play steady pink noise, hold the meter next to the mic, set the **same weighting (A/C/Z) and speed** as the handheld, type its reading and press **Measure (10 s)**. |
 | **Manual** | You know the numbers | Either "0 dBFS sine = X dB SPL", or mic sensitivity (mV/Pa) + preamp gain + interface dBu at 0 dBFS. |
 
 **UMIK tips**
@@ -92,6 +93,10 @@ itself.
   response*, and then you set the *absolute level* with the **acoustic calibrator** step on the same profile. Do the
   calibrator step again whenever you change the preamp gain.
 - Phantom power on, and keep the preamp gain where you'll leave it for the service.
+
+**Compare like with like.** A-weighting reads lower than C or Z on pink noise and bass-heavy sound, often by
+3 to 10 dB. The big number's title (e.g. **LAS · A-weighted · Slow**) tells you what you're looking at, and the
+wizard's last page shows the reading in the dashboard's weighting with LAS / LCS / LZF underneath.
 
 After any gain change on an analog mic/interface, **recalibrate**. The status bar shows the active profile, how it was
 calibrated, and turns yellow when the calibration is more than 30 days old.

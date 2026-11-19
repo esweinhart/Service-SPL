@@ -904,7 +904,10 @@ class Tile(QtWidgets.QFrame):
         self.info.set_text(explain(title) or self.tip)
 
     def refresh_theme(self):
-        self.t.setStyleSheet(f"color:{T['dim']}; font-size:9pt; background:transparent;")
+        if getattr(self, "big_title", False):      # main meter: make the weighting impossible to miss
+            self.t.setStyleSheet(f"color:{T['fg']}; font-size:12pt; font-weight:700; background:transparent;")
+        else:
+            self.t.setStyleSheet(f"color:{T['dim']}; font-size:9pt; background:transparent;")
         self.s.setStyleSheet(f"color:{T['dim']}; font-size:8pt; background:transparent;")
         self._paint_value()
 
@@ -1382,6 +1385,8 @@ class MeterPanel(QtWidgets.QWidget):
         self.banner.clicked.connect(lambda: self.banner.setVisible(False))
         v.addWidget(self.banner)
         self.main_tile = Tile("LAS", size=96)
+        self.main_tile.big_title = True
+        self.main_tile.refresh_theme()
         self.thumb = Thumb(130)
         ml = self.main_tile.layout()
         ml.removeWidget(self.main_tile.v)
@@ -2088,6 +2093,7 @@ class CalWizard(QtWidgets.QDialog):
         self._build_file_page()
         self._build_manual_page()
         self._build_done_page()
+        self._build_ref_page()
         self.history = [0]
         self.show_page(0)
         self.timer = QtCore.QTimer(self)
@@ -2129,14 +2135,19 @@ class CalWizard(QtWidgets.QDialog):
     def _build_method_page(self):
         lay = self._page("2 · How do you want to calibrate?")
         self.m_cal = QtWidgets.QRadioButton("Acoustic calibrator (most accurate)")
-        self.m_file = QtWidgets.QRadioButton("Load the mic's calibration file (UMIK-1 / UMIK-2 / REW .txt)")
+        self.m_file = QtWidgets.QRadioButton("Load the mic's calibration file (UMIK, Audix TM1, REW .txt / .cal / .frd)")
         self.m_man = QtWidgets.QRadioButton("Enter numbers by hand (mic sensitivity or known offset)")
+        self.m_ref = QtWidgets.QRadioButton("Match a reference SPL meter (pink noise)")
         self.m_cal.setChecked(True)
         lay.addWidget(self.m_cal)
         lay.addWidget(self._note("Put a 94 or 114 dB calibrator on the mic. Takes 5 seconds."))
+        lay.addWidget(self.m_ref)
+        lay.addWidget(self._note("No calibrator? Play steady pink noise, hold a trusted SPL meter next to the mic, "
+                                 "pick the same weighting and speed as that meter, and type in what it reads."))
         lay.addWidget(self.m_file)
-        lay.addWidget(self._note("Applies the frequency correction, and the Sens Factor for absolute level "
-                                 "when your input volume is at 100 %. You can fine-tune with a calibrator afterwards."))
+        lay.addWidget(self._note("Applies the frequency correction. USB mics (UMIK) also get their absolute level "
+                                 "from the Sens Factor. Analog mics like the TM1 then need a calibrator or reference "
+                                 "meter step to set the level: the wizard takes you there."))
         lay.addWidget(self.m_man)
         lay.addWidget(self._note("Mic mV/Pa plus interface gain, or type an offset you already know."))
         lay.addStretch()
@@ -2232,9 +2243,50 @@ class CalWizard(QtWidgets.QDialog):
         self.d_live.setAlignment(QtCore.Qt.AlignCenter)
         self.d_live.setStyleSheet(f"font-size:30pt; font-weight:700; {MONO}")
         lay.addWidget(self.d_live)
-        lay.addWidget(self._note("This is the live reading (Z, Fast) with the new calibration. "
-                                 "With the calibrator still on, it should match its level."))
+        self.d_others = QtWidgets.QLabel("")
+        self.d_others.setAlignment(QtCore.Qt.AlignCenter)
+        self.d_others.setStyleSheet(f"{MONO} font-size:11pt;")
+        lay.addWidget(self.d_others)
+        self.d_note = self._note("")
+        lay.addWidget(self.d_note)
+        self.d_warn = QtWidgets.QLabel("")
+        self.d_warn.setWordWrap(True)
+        self.d_warn.setStyleSheet(f"color:{T['yellow']}; font-weight:600;")
+        lay.addWidget(self.d_warn)
         lay.addStretch()
+
+    def _build_ref_page(self):
+        lay = self._page("3 · Match a reference SPL meter")
+        lay.addWidget(self._note(
+            "1. Play steady pink noise at a typical level (75 to 90 dB). Use Theater cal → Play, or your console's "
+            "generator.\n2. Put your reference meter right next to the mic, pointing the same way.\n"
+            "3. Set the weighting and speed below to match the reference meter (most read C or A, Slow).\n"
+            "4. Type what the reference meter reads, then press Measure (10 s)."))
+        f = QtWidgets.QFormLayout()
+        self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["C", "A", "Z"])
+        self.r_t = QtWidgets.QComboBox(); self.r_t.addItems(["Slow", "Fast"])
+        self.r_ref = QtWidgets.QDoubleSpinBox(); self.r_ref.setRange(30, 140); self.r_ref.setDecimals(1)
+        self.r_ref.setValue(85.0); self.r_ref.setSuffix(" dB")
+        f.addRow("Reference meter weighting", with_tip(self.r_w, "Weighting"))
+        f.addRow("Reference meter speed", with_tip(self.r_t, "Speed"))
+        f.addRow("Reference meter reads", self.r_ref)
+        lay.addLayout(f)
+        self.r_live = QtWidgets.QLabel("--.- dB")
+        self.r_live.setAlignment(QtCore.Qt.AlignCenter)
+        self.r_live.setStyleSheet(f"font-size:30pt; font-weight:700; {MONO}")
+        lay.addWidget(self.r_live)
+        row = QtWidgets.QHBoxLayout()
+        self.r_start = QtWidgets.QPushButton("Start meter"); self.r_start.clicked.connect(self.main.run_btn.click)
+        self.r_meas = QtWidgets.QPushButton("Measure (10 s)"); self.r_meas.clicked.connect(self.measure_ref)
+        self.r_prog = QtWidgets.QProgressBar(); self.r_prog.setRange(0, 100); self.r_prog.setValue(0)
+        row.addWidget(self.r_start); row.addWidget(self.r_meas); row.addWidget(self.r_prog, 1)
+        lay.addLayout(row)
+        self.r_res = QtWidgets.QLabel("")
+        self.r_res.setWordWrap(True)
+        lay.addWidget(self.r_res)
+        lay.addStretch()
+        self.ref_raw = None
+        self.ref_busy = False
 
     # navigation ----------------------------------------------------------
     def show_page(self, i):
@@ -2242,8 +2294,12 @@ class CalWizard(QtWidgets.QDialog):
         self.title.setText(self.stack.widget(i).property("title"))
         self.back.setEnabled(len(self.history) > 1)
         self.next.setText("Save ✓" if i == 5 else "Next ▶")
+        if i in (2, 6):              # measure through the curve this profile will use
+            self._use_curve(self.base_profile()[1].get("cal_points")
+                            if self.base_profile()[1].get("use_curve", True) else None)
         if i == 5:
             self.fill_summary()
+            self._use_curve(self.result.get("cal_points") if self.result else None)
 
     def go_back(self):
         if len(self.history) > 1:
@@ -2257,8 +2313,8 @@ class CalWizard(QtWidgets.QDialog):
                 self.p_name.setFocus(); return
             nxt = 1
         elif i == 1:
-            nxt = 2 if self.m_cal.isChecked() else 3 if self.m_file.isChecked() else 4
-        elif i in (2, 3, 4):
+            nxt = 2 if self.m_cal.isChecked() else 3 if self.m_file.isChecked() else 6 if self.m_ref.isChecked() else 4
+        elif i in (2, 3, 4, 6):
             if not self.make_result(i):
                 return
             nxt = 5
@@ -2274,6 +2330,25 @@ class CalWizard(QtWidgets.QDialog):
         prof = copy.deepcopy(self.main.cfg["profiles"].get(name) or DEFAULTS["profiles"]["Default"])
         return name, prof
 
+    def _use_curve(self, pts):
+        """Run the live engine through the frequency correction being set up, so the wizard reads what the
+        dashboard will read after Save."""
+        e = self.main.engine
+        if e is not None:
+            key = None if not pts else (len(pts), pts[0][0], pts[-1][0], round(sum(p[1] for p in pts), 4))
+            if getattr(e, "_wiz_curve", "unset") != key:
+                e.calfilt = CalFilter(pts, e.fs) if pts else None
+                e._wiz_curve = key
+
+    def measure_ref(self):
+        e = self.main.engine
+        if e is None:
+            return
+        e.begin_cal(10.0, self.r_w.currentText())
+        self.ref_busy = True
+        self.r_meas.setEnabled(False)
+        self.r_res.setText("Measuring… keep the noise steady and don't move the meters")
+
     def measure(self):
         e = self.main.engine
         if e is None:
@@ -2287,6 +2362,7 @@ class CalWizard(QtWidgets.QDialog):
         running = e is not None and self.main.running()
         self.c_start.setVisible(not running)
         self.c_meas.setEnabled(running and not (e and e.cal_target))
+        self.r_meas.setEnabled(running and not (e and e.cal_target))
         if not running:
             self.c_live.setText("--.- dB")
             self.c_stab.setText("Meter is stopped: press Start meter")
@@ -2299,7 +2375,7 @@ class CalWizard(QtWidgets.QDialog):
         self.c_stab.setStyleSheet(f"color:{T['green'] if spread < 0.3 else T['yellow']}; font-weight:600;")
         if e.cal_target:
             self.c_prog.setValue(int(e.cal_progress * 100))
-        if e.cal_done:
+        if e.cal_done and not self.ref_busy:
             raw = e.finish_cal()
             try:
                 ref = float(self.c_level.currentText())
@@ -2310,9 +2386,29 @@ class CalWizard(QtWidgets.QDialog):
             self.c_res.setText(f"Done. Offset {off:.2f} dB (was {e.offset:.2f}, change {off - e.offset:+.2f} dB). "
                                "Press Next.")
             self.c_prog.setValue(100)
-        if self.stack.currentIndex() == 5 and self.result:
-            raw_now = lz - e.offset
-            self.d_live.setText(f"{raw_now + self.result['offset']:.1f} dB")
+        page = self.stack.currentIndex()
+        if page == 6:
+            w, t = self.r_w.currentText(), "S" if self.r_t.currentText() == "Slow" else "F"
+            self.r_start.setVisible(not running)
+            self.r_live.setText(f"L{w}{t}  {fmt(e.level(w, t)).strip()} dB")
+            if self.ref_busy:
+                self.r_prog.setValue(int(e.cal_progress * 100))
+        if self.ref_busy and e.cal_done:
+            raw = e.finish_cal()
+            self.ref_busy = False
+            ref = self.r_ref.value()
+            self.ref_raw = (raw, ref, self.r_w.currentText(), self.r_t.currentText())
+            self.r_meas.setEnabled(True)
+            self.r_prog.setValue(100)
+            off = ref - raw
+            self.r_res.setText(f"Done. Offset {off:.2f} dB (was {e.offset:.2f}, change {off - e.offset:+.2f} dB). "
+                               "Press Next.")
+        if page == 5 and self.result:
+            d = self.result["offset"] - e.offset
+            mw, mt = self.main.cfg["main_weight"], self.main.cfg["main_time"]
+            self.d_live.setText(f"L{mw}{mt}  {fmt(e.level(mw, mt) + d).strip()} dB")
+            others = [(k, tt) for k, tt in (("A", "S"), ("C", "S"), ("Z", "F")) if (k, tt) != (mw, mt)]
+            self.d_others.setText("   ·   ".join(f"L{k}{tt} {fmt(e.level(k, tt) + d).strip()}" for k, tt in others))
 
     def choose_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Mic calibration file", os.path.expanduser("~"),
@@ -2397,9 +2493,19 @@ class CalWizard(QtWidgets.QDialog):
             self.result = dict(offset=off, method="cal file",
                                info=f"{d['name']} ({what}) · {now:%b %d %H:%M}",
                                cal_points=d["points"] if self.f_curve.isChecked() else None,
-                               cal_file=d["name"], sens_factor=d["sens_factor"], serial=d["serial"])
+                               cal_file=d["name"], sens_factor=d["sens_factor"], serial=d["serial"],
+                               level_set=what != "level unchanged" or bool(prof.get("calibrated")))
             if not self.f_sens.isChecked() and prof.get("calibrated"):
                 self.result["info"] = prof["cal_info"] + f" + {d['name']} curve"
+        elif page == 6:
+            if not self.ref_raw:
+                self.r_res.setText("Press Measure first.")
+                return False
+            raw, ref, w, t = self.ref_raw
+            self.result = dict(offset=ref - raw, method="reference meter",
+                               info=f"matched {ref:.1f} dB{w} {t} reference · {now:%b %d %H:%M}",
+                               cal_points=prof.get("cal_points"), cal_file=prof.get("cal_file", ""),
+                               sens_factor=prof.get("sens_factor"), serial=prof.get("serial", ""))
         else:
             off = self.manual_offset()
             self.result = dict(offset=off, method="manual",
@@ -2411,6 +2517,18 @@ class CalWizard(QtWidgets.QDialog):
     def fill_summary(self):
         name, prof = self.base_profile()
         r = self.result
+        mw, mt = self.main.cfg["main_weight"], self.main.cfg["main_time"]
+        how = {"calibrator": "With the calibrator still on, the Z reading should match its level.",
+               "reference meter": f"It should match your reference meter when set to the same weighting "
+                                  f"({self.ref_raw[2] if self.ref_raw else 'C'}) and speed.",
+               }.get(r["method"], "")
+        self.d_note.setText(f"Live reading with the new calibration, in the dashboard's weighting (L{mw}{mt}), "
+                            "with the other weightings underneath. A-weighting reads lower than C or Z on pink "
+                            "noise and on bass-heavy sound, often by 3 to 10 dB, so compare like with like. " + how)
+        self.d_warn.setText("" if r.get("level_set", True) else
+                            "The frequency correction is loaded, but the absolute level isn't set yet. This file has "
+                            "no Sens Factor (normal for analog mics like the TM1). After Save, the wizard takes you "
+                            "straight to the level step: use a calibrator or match a reference meter.")
         self.d_sum.setText(f"<b>Profile:</b> {name}<br><b>Method:</b> {r['method']}<br>"
                            f"<b>Offset:</b> {r['offset']:.2f} dB (was {prof['offset']:.2f}, "
                            f"change {r['offset'] - prof['offset']:+.2f} dB)<br>"
@@ -2419,7 +2537,8 @@ class CalWizard(QtWidgets.QDialog):
     def save(self):
         name, prof = self.base_profile()
         prof.update(self.result)
-        prof.update(calibrated=True, cal_info=self.result["info"], date=datetime.datetime.now().isoformat(),
+        level_set = self.result.pop("level_set", True)
+        prof.update(calibrated=bool(level_set), cal_info=self.result["info"], date=datetime.datetime.now().isoformat(),
                     use_curve=bool(self.result["cal_points"]))
         if self.p_auto.isChecked():
             prof.update(auto_select=True, device_hint=self.main.dev.currentText())
@@ -2427,6 +2546,15 @@ class CalWizard(QtWidgets.QDialog):
         self.main.cfg["profiles"][name] = prof
         self.main.set_profile(name)
         self.main.add_event(f"Calibrated '{name}': offset {prof['offset']:.2f} dB ({prof['method']})")
+        if not level_set:            # curve saved; now set the absolute level on the same profile
+            self.p_combo.clear(); self.p_combo.addItems(list(self.main.cfg["profiles"]))
+            self.p_existing.setChecked(True); self.p_combo.setCurrentText(name); self.p_name.clear()
+            self.m_ref.setChecked(True)
+            self.result, self.cal_raw, self.ref_raw = None, None, None
+            self.history = [0, 1]
+            self.show_page(1)
+            self.title.setText(f"2 · Now set the level for '{name}'")
+            return
         self.accept()
 
     def done(self, r):
@@ -2434,6 +2562,11 @@ class CalWizard(QtWidgets.QDialog):
         e = self.main.engine
         if e is not None:
             e.cal_target = 0
+            if hasattr(e, "_wiz_curve"):
+                del e._wiz_curve
+                prof = self.main.active_profile()
+                pts = prof.get("cal_points") if prof.get("use_curve") else None
+                e.calfilt = CalFilter(pts, e.fs) if pts else None
         super().done(r)
 
 
