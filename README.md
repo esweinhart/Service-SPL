@@ -11,19 +11,23 @@ needed) and on Windows.
 - LAeq 1 min / 15 min / since reset, LCeq, LAFmax, true-peak LCpeak, LA10 / LA50 / LA90
 - Calibration wizard with a **profile per mic**: acoustic calibrator, UMIK-1/UMIK-2 cal files, or manual numbers
 - **1/3-octave RTA** and a scrolling **spectrogram**
-- **Theater calibration**: built-in pink noise generator, per-channel 85 dBC (cinema) targets, auto run
+- **Pink noise from your speakers** for calibration and room EQ (Left + Right, one side, or any output)
 - **Room EQ helper**: measures several seats, compares with a target curve and tells you what to cut
 - **OSHA / NIOSH noise dosimeter** with action-level and limit warnings
 - **Session logging**: CSV every 1 s / 10 s / 1 min, markers, alarms, a **PDF report**, session CSV export
-- **Scheduled logging** (e.g. every Sunday 08:30–12:30) and **auto-save to OneDrive** in dated folders
+- **Scheduled logging** (e.g. every Sunday 8:30 AM – 12:30 PM, with a *Logging Complete* animation at the end) and **auto-save to OneDrive** in dated folders
 - **Planning Center Services Live**: every log row is stamped with the current item, with levels per item
 - **Bitfocus Companion**: live level and color on a Stream Deck button
 - **NDI** output of just the meter graphic, for your video switcher
 - **Mac menu bar** readout (`● 87.3`, dot goes green/yellow/red), a mini always-on-top meter, and a **web view**
-- Dashboard layout: every panel can be shown, hidden, dragged, stacked or floated. Follows macOS light/dark.
-- A second toolbar row has one button per panel (RTA, Spectrogram, Dosimeter, Theater cal, Session, Planning Center), plus **¼ screen** and **Fit**
+- Dashboard layout: every panel can be shown, hidden, dragged or stacked, always inside the main window. Every
+  popup (settings, calibration, schedule, guide, messages) opens inside the main window too; only the Mini meter,
+  the Web view (a browser) and NDI live outside it. Follows macOS light/dark.
+- A second toolbar row has one button per panel (RTA | Spectrogram, Dosimeter, Session, Planning Center), plus **¼ screen** and **Fit**
+- Toolbar buttons can be **dragged into your own order**: click **🔒 Locked** (end of the second row) to unlock, drag, click again to lock
+- **Mini**, **Web view** and **NDI** sit in their own bar at the bottom of the window
 - Little **!** marks next to readings and settings: hover over one for a plain-English explanation of LAeq, LAFmax, LCpeak, L10/L90, A/C/Z weighting, Fast/Slow, dose, TWA, dBFS and more
-- A built-in **Guide** (toolbar **? Guide**) walks you through all of this inside the app
+- A built-in **Guide** (**Help → Guide…**) walks you through all of this inside the app
 
 ---
 
@@ -58,7 +62,7 @@ python spl_monitor.py
 2. Press **▶ Start**.
 3. Press **Calibrate…** and follow the wizard (next section).
 4. Set **Red at** to your house limit. The reading turns yellow 5 dB before it and red at it, and the thumb flips down.
-5. Hit **? Guide** any time for step-by-step help.
+5. **Help → Guide…** any time for step-by-step help.
 
 There are two test inputs at the bottom of the input menu: **Simulated pink noise** and **Simulated 94 dB calibrator**.
 Handy for trying things without a mic.
@@ -76,16 +80,18 @@ itself.
 |---|---|---|
 | **Acoustic calibrator** | Best accuracy, any mic | Seat a 94 or 114 dB calibrator (1 kHz or 250 Hz), wait for *steady*, press **Measure (5 s)**. Measured unweighted, so it works with either frequency. |
 | **Mic calibration file** | USB mics like miniDSP UMIK-1 / UMIK-2, analog measurement mics like the **Audix TM1**, Dayton EMM-6, or any REW-style `.txt` / `.cal` / `.frd` / `.csv` | Loads the frequency-response correction (applied as a linear-phase FIR to everything: meter, RTA, logs). If the file has a `Sens Factor` (UMIK), the absolute level is set from it too. |
-| **Match a reference SPL meter** | No calibrator, but you have a trusted handheld meter | Play steady pink noise, hold the meter next to the mic, set the **same weighting (A/C/Z) and speed** as the handheld, type its reading and press **Measure (10 s)**. |
+| **Pink noise from my speakers + a reference SPL meter** | No calibrator, but you have a trusted handheld meter | ServiceSPL plays pink noise out of your speakers (**▶ Play pink noise** on that page), hold the meter next to the mic, set the **same weighting (A/C/Z) and speed** as the handheld, type its reading and press **Measure (10 s)**. |
 | **Manual** | You know the numbers | Either "0 dBFS sine = X dB SPL", or mic sensitivity (mV/Pa) + preamp gain + interface dBu at 0 dBFS. |
 
-**Calibrate with pink noise from the room speakers (Match a reference SPL meter)**
+**Calibrate with pink noise from your speakers** (also **Tools → Calibrate with pink noise from my speakers…**)
 1. Set the mic's preamp gain and phantom power where you'll leave them for the service. If you change the gain
    later, calibrate again.
 2. Put the mic (e.g. the TM1) on a stand at the main listening position, pointing at the ceiling. Hold or mount
    your handheld meter right next to it, at the same height and pointing the same way.
-3. Play pink noise through the main speakers. Use **Theater cal → Play** (send it to your console), or your
-   console's generator, at about **-20 dBFS**.
+3. On the wizard page, pick **Speakers out of** (the output that feeds your console or speakers; the Mac's current
+   sound output is picked for you), **Channels** (Left + Right, Left only, Right only or any output number) and
+   **Level** (start at **-20 dBFS** with the speakers turned down), then press **▶ Play pink noise**. Your console's
+   generator works too.
 4. Bring the speakers up until the handheld reads about **85 dB**. Keep the room quiet: no HVAC blasts, talking or
    walking around.
 5. Set the handheld and ServiceSPL to the **same weighting and speed**. **Z (flat) + Slow** is the easiest match,
@@ -144,7 +150,7 @@ calibrated, and turns yellow when the calibration is more than 30 days old.
 
 ## 5. Dashboard panels
 Use the **View** menu to show/hide panels. Drag a panel's title bar to move it, drop it on another to stack them as
-tabs, or double-click to float it. The layout is saved when you quit.
+tabs. Panels stay inside the main window (no floating windows). The layout is saved when you quit.
 
 ### RTA · 1/3 octave
 Weighting Z/A/C, speed Fast/Slow/**Leq** (average since **Reset**). White ticks are peak hold.
@@ -163,25 +169,6 @@ Its own panel, so you can place it anywhere or close it. It scrolls the last ~20
 Each shows dose %, TWA, an 8-hour projection and the time left to 100 %. Warnings fire at 50 % and 100 %, when the
 pace projects over 100 %, and if any peak hits 140 dB. **Reset dose** at the start of a shift or call. The dose keeps
 running across Stop/Start. Guidance only; use a certified dosimeter for compliance records.
-
-### Theater calibration
-1. **Output**: your interface (or *Simulated* to try it). **Format**: 2.0, 5.1, 7.1, 7.1.4. **Room** preset:
-
-   | Preset | Screen | Surround / height | LFE | Noise |
-   |---|---|---|---|---|
-   | Cinema / dub stage | 85 dBC | 82 dBC | 91 dBC* | -20 dBFS |
-   | Mid-size mix room | 82 | 79 | 88* | -20 dBFS |
-   | Small room / nearfield | 79 | 76 | 85* | -20 dBFS |
-   | Home theater | 75 | 75 | 85* | -30 dBFS |
-
-   *LFE targets are a starting point: confirm on the RTA (about +10 dB in-band over the screen channels).
-2. Check the **Out** column matches your patch (SMPTE order L R C LFE Ls Rs …). Out numbers and targets are editable.
-3. Mic at the main listening position, pointing up (90° cal file).
-4. **▶ Play**, adjust the channel until the big number says **on target ✓** (±0.5 dB), **Next ▶**. Or press
-   **Auto run**: every channel plays 7 s (4 s settle + 3 s capture) and the table shows what to turn up or down.
-
-Noise is pink, -20 dBFS RMS (AES17: a full-scale sine = 0 dBFS), band-limited 500 Hz – 2 kHz by default
-(SMPTE/Dolby). Full-band and LFE-band noise are in the Noise menu. The LFE channel is always band-limited to 20–120 Hz.
 
 ### Session · markers · alarms · export
 - Time history of the whole session (last 10 min / hour / 4 h / everything), markers in yellow, alarms as red ticks.
@@ -223,6 +210,7 @@ get stamped with it, and the levels are kept per item. Setup takes about 3 minut
 **Troubleshooting**
 | Symptom | Fix |
 |---|---|
+| `CERTIFICATE_VERIFY_FAILED` (ServiceSPL 2.0 on a Mac) | Fixed in 2.1: the app now carries its own certificate bundle. Update the app; your keys were fine. If it still happens, check the Mac's date/time and any web filter. |
 | `401` / Unauthorized | Wrong Application ID or Secret, or the token was revoked. Make a new token. |
 | Connected, but no service types or plans | The account behind the token can't see them. Give it Viewer access in Services. |
 | Following, but the item never changes | Nobody has taken control in Services Live, or a different plan is picked. Check the plan's date. |
@@ -263,8 +251,15 @@ The menu bar shows `● 87.3` with the dot in green / yellow / red. Click it for
    (127.0.0.1 if it's the same Mac).
 3. Put `$(custom:spl_level)` on a button. `spl_state` is `good` / `warn` / `bad` for feedback rules, `spl_color` is
    the hex color.
-4. Or the zero-setup way: fill in **Paint this button** with a location like `1/0/0` (page/row/column). ServiceSPL then
-   sets that button's text (level + weighting) and background color directly, 4 times a second.
+4. Or the zero-setup way: Settings → Integrations → **Button location**, a page/row/column like `1/0/0`, and pick
+   **Paint button(s)**:
+   - **One button**: that button shows the level + weighting (e.g. `87.3` / `LAS`) and turns green / yellow / red.
+   - **Four buttons in a row**: that button and the 3 to its right show the reading big, one piece per key:
+     `8` · `7` · `.3` · `dBA` (or `10` · `2` · `.4` · `dBA` above 100). All 4 turn green / yellow / red together.
+     In Companion, set those 4 buttons' **text size to Auto** (or the largest size) so each piece fills its key.
+
+   ServiceSPL updates them 4 times a second. Building your own layout instead? The 4 pieces are also in the custom
+   variables `spl_d1` … `spl_d4` (create them first).
 
 Prefer polling? With **Web view** on, `http://<mac-ip>:8080/api/json` returns all values as JSON and
 `/api/level` returns just the number.
@@ -286,8 +281,8 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 
 ---
 
-## 8. Room EQ helper (Help → Room EQ helper, or ? Guide → Room EQ)
-1. Pick the output and channel of the speaker you're tuning, **▶ Play pink noise** (full-band, -20 dBFS) and bring it to
+## 8. Room EQ helper (Help → Room EQ helper)
+1. Pick the output and channels of the speakers you're tuning, **▶ Play pink noise** (full-band, -20 dBFS) and bring it to
    a comfortable 80–85 dBC.
 2. Mic where people sit. **Measure position (10 s)**. Do 3–5 seats; they're energy-averaged.
 3. Pick a target: Flat, Live/worship house curve (+6 dB under 200 Hz, gentle HF roll-off), Cinema X-curve (SMPTE ST 202),
@@ -317,12 +312,12 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 | NOT CALIBRATED in the status bar | Run Calibrate… for the active profile, or pick the right profile in the toolbar. |
 | "dropouts" in the status bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
 | No menu-bar number | Settings → Display → menu-bar box. (If the Mac build lacks the Cocoa bridge, a colored icon is shown instead.) |
-| Companion button doesn't change | Create the custom variables first; check OSC is enabled in Companion and the IP/port match; for *Paint this button*, use page/row/column like `1/0/0`. |
+| Companion button doesn't change | Create the custom variables first (including `spl_d1`…`spl_d4` if you use them); check OSC is enabled in Companion and the IP/port match; for *Paint this button*, use page/row/column like `1/0/0`. |
 | NDI button says runtime not found | Install NDI Tools (ndi.video/tools), or browse to `libndi.dylib` in Settings → Integrations. |
 | Planning Center problems | See the troubleshooting table in the Planning Center section above, or **? Setup help** in the panel. |
 | Nothing in OneDrive | Settings → Logging: auto-save folder set? Is OneDrive signed in and syncing? Files land under `ServiceSPL/<year>/<date>`. |
 | Schedule didn't start | The app must be open (it can be minimized or in mini mode). Check the window's days/date and that it's ticked On. |
-| Theater cal: no sound | Pick the right Output and check the Out numbers match your patch; for ASIO, only that one channel is opened. |
+| Pink noise: no sound | Pick the right **Speakers out of** device and channels; check the Mac's output volume and that the speakers are up. For ASIO, only the chosen channels are opened. |
 | Web view: page won't load | Same network? Allow incoming connections on the Mac. Try another port in Settings → Integrations. |
 
 ---

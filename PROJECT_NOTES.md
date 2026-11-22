@@ -18,6 +18,18 @@ Renamed to **ServiceSPL** by Eric on 2026-11-19. Bundle id `com.servicespl.app`;
   dashboard, light/dark following macOS, in-app Guide.
 - Web view: `/` page, `/data` JSON for the page, `/api/json` and `/api/level` for other software.
 
+## v2.1 (Nov 22 2026, Eric's polish list)
+- Theater calibration removed. Pink noise now comes from a shared `NoiseControls` widget (calibration wizard's
+  "Pink noise from my speakers + reference SPL meter" page and the Room EQ helper): output device, Left + Right / one side / any output, level, noise type.
+- Every popup runs as a card inside the main window (`exec_in_window`, `message`, `ask_box`, `get_text`). Only Mini,
+  Web view (browser) and NDI live outside. File open/save pickers stay native. Dock panels can't float any more.
+- Toolbars are `ReorderBar`s: unlock with 🔒 to drag buttons/dividers; order saved in `cfg["bar_order"]`.
+  Mini / Web view / NDI moved to a bottom bar. Guide button removed (Help → Guide…).
+- Scheduler: 12-hour times, round day letters, 🗑 per row; "Logging Complete" animation when a scheduled window ends.
+- Companion: `companion_layout` = one button or four buttons (tens · ones · .d · dBA), plus variables spl_d1..spl_d4.
+- PCO fix: the Mac build's python.org Python had no CA bundle → CERTIFICATE_VERIFY_FAILED. Now uses certifi
+  (bundled with --collect-data certifi) and CI runs `ServiceSPL --check-https` on the built app.
+
 ## Design decisions
 - v1 was deliberately a simple meter + logging. In Nov 2026 Eric asked for the full pro feature set, so the RTA and
   history came back as optional dock panels; the big meter stays the centre of the window.

@@ -184,9 +184,23 @@ def test_settings_backup():
     w.close()
 
 
+def test_v21_helpers():
+    ok("4 buttons: 87.3", sm.big_digits("87.3") == ["8", "7", ".3", "dBA"])
+    ok("4 buttons: 102.4 dBC", sm.big_digits("102.4", "dBC") == ["10", "2", ".4", "dBC"])
+    ok("4 buttons: stopped", sm.big_digits("--.-") == ["-", "-", ".-", "dBA"])
+    ok("schedule AM/PM", [sm.ampm(t) for t in ("00:05", "09:00", "12:30", "18:45")]
+       == ["12:05 AM", "9:00 AM", "12:30 PM", "6:45 PM"])
+    ok("PCO key cleanup", sm.clean_key(' Application ID: ab12\n') == "ab12" and sm.clean_key('"cd 34"') == "cd34")
+    ok("HTTPS context has CA certificates", sm.https_context().cert_store_stats()["x509_ca"] > 0)
+    import urllib.error
+    e401 = urllib.error.HTTPError(sm.PcoClient.BASE, 401, "Unauthorized", {}, None)
+    ok("PCO 401 explained", "rejected" in sm.pco_error_text(e401))
+    ok("old theater settings dropped", "theater" not in sm.merge_cfg({"theater": {"layout": "5.1"}}))
+
+
 if __name__ == "__main__":
     for t in (test_true_peak, test_rta, test_cal_file, test_dose, test_pink, test_ln, test_eq_and_osc,
-              test_cal_formats, test_settings_backup):
+              test_cal_formats, test_settings_backup, test_v21_helpers):
         print(t.__name__)
         t()
     print("All engine checks passed.")

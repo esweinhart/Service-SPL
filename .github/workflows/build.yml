@@ -45,7 +45,7 @@ jobs:
           for p in numpy scipy cffi; do delocate-merge whl_x86/$p-*.whl whl_arm/$p-*.whl -w fused; done
           ls fused
           pip install fused/*.whl
-          pip install PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa
+          pip install PySide6 sounddevice pyinstaller pyobjc-core pyobjc-framework-Cocoa certifi
       - name: Self-test (IEC 61672 + engine)
         env:
           QT_QPA_PLATFORM: offscreen
@@ -60,6 +60,7 @@ jobs:
             --target-arch universal2 \
             --osx-bundle-identifier com.servicespl.app \
             --collect-data _sounddevice_data \
+            --collect-data certifi \
             --icon assets/ServiceSPL.icns \
             spl_monitor.py
           APP="dist/ServiceSPL.app"
@@ -78,6 +79,8 @@ jobs:
             fi
           done < <(find "$APP" -type f \( -name "*.so" -o -name "*.dylib" -o -perm -u+x \))
           [ $bad = 0 ] || exit 1
+          echo "--- HTTPS check (Planning Center needs a CA bundle inside the app) ---"
+          "$APP/Contents/MacOS/ServiceSPL" --check-https
           ditto -c -k --keepParent "$APP" "ServiceSPL-Mac-AppleSilicon.zip"
           mkdir dmg && cp -R "$APP" dmg/ && ln -s /Applications dmg/Applications
           hdiutil create -volname ServiceSPL -srcfolder dmg -ov -format UDZO "ServiceSPL-Mac-AppleSilicon.dmg"
@@ -98,10 +101,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy PySide6 sounddevice pyinstaller
+          pip install numpy scipy PySide6 sounddevice pyinstaller certifi
       - name: Build .exe
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name ServiceSPL --icon assets/ServiceSPL.ico --collect-data _sounddevice_data spl_monitor.py
+          pyinstaller --noconfirm --onefile --windowed --name ServiceSPL --icon assets/ServiceSPL.ico --collect-data _sounddevice_data --collect-data certifi spl_monitor.py
           Compress-Archive -Path dist\ServiceSPL.exe -DestinationPath ServiceSPL-Windows.zip
       - uses: actions/upload-artifact@v5
         with:
