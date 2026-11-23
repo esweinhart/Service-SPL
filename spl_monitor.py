@@ -644,9 +644,12 @@ def style_sheet():
     return f"""
 QWidget {{ background:{T['bg']}; color:{T['fg']}; font-family:'Segoe UI','Helvetica Neue',Arial; font-size:10pt; }}
 QFrame#tile {{ background:{T['panel']}; border:1px solid {T['border']}; border-radius:6px; }}
-QMainWindow::separator {{ background:{T['bg']}; width:7px; height:7px; }}
+QMainWindow::separator {{ width:9px; height:9px; }}
+QMainWindow::separator:vertical {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
+QMainWindow::separator:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
 QMainWindow::separator:hover {{ background:{T['accent']}; }}
-QSplitter::handle {{ background:{T['bg']}; }}
+QSplitter::handle:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
+QSplitter::handle:vertical {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
 QSplitter::handle:hover {{ background:{T['accent']}; }}
 QFrame#tile QLabel {{ background:transparent; }}
 QPushButton, QToolButton {{ background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:4px; padding:5px 12px; }}
@@ -2317,7 +2320,7 @@ class SessionPanel(QtWidgets.QWidget):
         v.addLayout(meta)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)   # drag the line between graph and markers/alarms
         split.setChildrenCollapsible(False)
-        split.setHandleWidth(7)
+        split.setHandleWidth(9)
         self.graph = SessionGraph(main)
         split.addWidget(self.graph)
         side_w = QtWidgets.QWidget()
