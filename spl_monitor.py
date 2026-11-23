@@ -4317,13 +4317,46 @@ Planning Center item.</li>
 <li><b>Auto-save folder</b> (Settings → Logging): point it at your OneDrive folder. Logs, the session CSV and the PDF
 report are saved there in dated folders (YYYY / YYYY-MM-DD - plan) and OneDrive syncs them.</li>
 <li><b>PDF report</b>: summary, time history, markers, alarms and per-item levels for the service.</li></ul>"""),
-    ("Companion, NDI & web", """<h2>Stream Deck (Companion), NDI and web view</h2>
-<ul><li><b>Companion</b>: enable it in Settings → Integrations. ServiceSPL sends OSC to Companion (port 12321) and sets
-custom variables <code>spl_level</code>, <code>spl_leq1m</code>, <code>spl_leqlong</code>, <code>spl_peak</code>,
-<code>spl_dose</code>, <code>spl_state</code>, <code>spl_color</code>, <code>spl_item</code>. Create those custom variables
-in Companion, then use <code>$(custom:spl_level)</code> on a button. Or give a button location (page/row/column) and
-ServiceSPL paints that button's text and color directly.</li>
-<li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “ServiceSPL” for your
+    ("Stream Deck (Companion)", """<h2>Stream Deck with Bitfocus Companion: setup and test</h2>
+<p>ServiceSPL sends the live level to Companion over OSC 4 times a second. About 5 minutes, and you can test it all
+without a Stream Deck plugged in.</p>
+<h3>1 · Install Companion</h3>
+<ol><li>Download and install <b>Bitfocus Companion</b> (free, bitfocus.io/companion).</li>
+<li>Start it and press <b>Launch GUI</b>. The Companion admin page opens in your browser.</li></ol>
+<h3>2 · Turn on Companion's OSC listener</h3>
+<ol><li>In the Companion admin page open <b>Settings</b> and find the <b>OSC</b> section (under Protocols).</li>
+<li>Enable the <b>OSC Listener</b> and set its port to <b>12321</b> (Companion's default).</li></ol>
+<h3>3 · Create the custom variables</h3>
+<p>In Companion open <b>Variables → Custom Variables</b> and add these (any starting value is fine):</p>
+<ul><li><code>spl_level</code>: the live reading, e.g. <code>87.3</code></li>
+<li><code>spl_leq1m</code> and <code>spl_leqlong</code>: LAeq 1 min and the long average</li>
+<li><code>spl_peak</code>: LCpeak · <code>spl_dose</code>: dose %</li>
+<li><code>spl_state</code>: <code>good</code> / <code>warn</code> / <code>bad</code>, handy for feedback rules</li>
+<li><code>spl_color</code>: the hex colour (green / yellow / red) · <code>spl_item</code>: the Planning Center item</li>
+<li>Optional for your own big-number layout: <code>spl_d1</code>, <code>spl_d2</code>, <code>spl_d3</code>,
+<code>spl_d4</code> (the reading split over 4 keys).</li></ul>
+<h3>4 · Point ServiceSPL at Companion</h3>
+<ol><li>ServiceSPL: <b>Settings → Integrations</b>, tick <b>Send levels to Bitfocus Companion (OSC)</b>.</li>
+<li><b>Companion computer</b>: <code>127.0.0.1</code> if Companion runs on this computer, otherwise that machine's IP.</li>
+<li><b>Companion OSC port</b>: <code>12321</code> (the same port as step 2).</li></ol>
+<h3>5 · Make a button</h3>
+<ul><li><b>Your own button</b>: set its text to <code>$(custom:spl_level)</code> and the text size to <b>Auto</b>.
+Add a feedback on <code>spl_state</code> to colour it.</li>
+<li><b>Let ServiceSPL paint it</b> (no variables needed): in Settings → Integrations set <b>Button location</b> to
+page/row/column, e.g. <code>1/0/0</code>, and pick <b>Paint button(s)</b>:
+<b>One button</b> shows level + weighting and turns green / yellow / red; <b>Four buttons in a row</b> uses that key
+and the 3 to its right for <code>8</code> · <code>7</code> · <code>.3</code> · <code>dBA</code>. Set those keys' text
+size to Auto.</li></ul>
+<h3>6 · Test it without a Stream Deck</h3>
+<p>Press <b>▶ Start</b> in ServiceSPL, then open Companion's <b>Emulator</b> (from the admin page). Your button should
+show the level and change colour live. The custom variables page also shows the values updating.</p>
+<h3>Good to know</h3>
+<ul><li>The port in ServiceSPL and Companion's OSC listener port must match.</li>
+<li>Lots of apps can <i>send</i> to Companion's port at once, but only one app per computer can <i>listen</i> on a
+port, so don't run another OSC listener on 12321 on the Companion machine.</li>
+<li>Companion on another computer? Allow <b>UDP 12321</b> through that computer's firewall.</li></ul>"""),
+    ("NDI & web view", """<h2>NDI and web view</h2>
+<ul><li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “ServiceSPL” for your
 switcher. Needs the free NDI Tools/runtime installed. Tick “transparent background” for a key-able overlay.</li>
 <li><b>Web view</b>: shows the big number in any browser on the network; <code>/api/json</code> and <code>/api/level</code>
 give the numbers to other software.</li></ul>"""),
@@ -4402,7 +4435,8 @@ class GuideWizard(QtWidgets.QDialog):
     ACTIONS = {"Welcome": "▶ Start the meter", "Calibrate your mic": "Open the calibration wizard…",
                "Monitoring a show": "Show the Session panel", "Hearing dose": "Show the dosimeter",
                "Logging & reports": "Edit the schedule…",
-               "Companion, NDI & web": "Open Settings…", "Planning Center": "Show the Planning Center panel"}
+               "Stream Deck (Companion)": "Open Settings…", "NDI & web view": "Open Settings…",
+               "Planning Center": "Show the Planning Center panel"}
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
@@ -4422,7 +4456,7 @@ class GuideWizard(QtWidgets.QDialog):
             m.docks[key].show(); m.docks[key].raise_()
         elif t == "Logging & reports":
             m.edit_schedule()
-        elif t == "Companion, NDI & web":
+        elif t in ("Stream Deck (Companion)", "NDI & web view"):
             m.settings()
 
     def _eq_page(self):

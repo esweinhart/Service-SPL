@@ -260,13 +260,19 @@ The menu bar shows `● 87.3` with the dot in green / yellow / red. Click it for
 **Mini ⤡** shrinks to a small box with the thumb and the number. 📌 keeps it on top, ⤢ or double-click goes back.
 
 ### Bitfocus Companion (Stream Deck)
-1. In Companion, create custom variables: `spl_level`, `spl_leq1m`, `spl_leqlong`, `spl_peak`, `spl_dose`,
-   `spl_state`, `spl_color`, `spl_item`. Make sure OSC is enabled in Companion (default port **12321**).
-2. In ServiceSPL: Settings → Integrations → tick **Send levels to Bitfocus Companion**, set the Companion computer's IP
-   (127.0.0.1 if it's the same Mac).
-3. Put `$(custom:spl_level)` on a button. `spl_state` is `good` / `warn` / `bad` for feedback rules, `spl_color` is
-   the hex color.
-4. Or the zero-setup way: Settings → Integrations → **Button location**, a page/row/column like `1/0/0`, and pick
+Also in the app: **Help → Guide → Stream Deck (Companion)**.
+
+1. Install **Bitfocus Companion** and press **Launch GUI**.
+2. Companion **Settings** → OSC: enable the **OSC Listener** on port **12321**.
+3. Companion **Variables → Custom Variables**: add `spl_level`, `spl_leq1m`, `spl_leqlong`, `spl_peak`, `spl_dose`,
+   `spl_state`, `spl_color`, `spl_item` (plus `spl_d1` … `spl_d4` if you build your own big-number layout).
+   `spl_state` is `good` / `warn` / `bad` for feedback rules, `spl_color` is the hex color.
+4. ServiceSPL: Settings → Integrations → tick **Send levels to Bitfocus Companion (OSC)**, set the Companion computer
+   to `127.0.0.1` (or the Companion machine's IP) and the port to `12321`.
+5. Put `$(custom:spl_level)` on a button with text size **Auto**. Test with Companion's **Emulator**, no Stream Deck
+   needed: press Start in ServiceSPL and watch the button update.
+
+6. Or the zero-setup way: Settings → Integrations → **Button location**, a page/row/column like `1/0/0`, and pick
    **Paint button(s)**:
    - **One button**: that button shows the level + weighting (e.g. `87.3` / `LAS`) and turns green / yellow / red.
    - **Four buttons in a row**: that button and the 3 to its right show the reading big, one piece per key:
@@ -275,6 +281,9 @@ The menu bar shows `● 87.3` with the dot in green / yellow / red. Click it for
 
    ServiceSPL updates them 4 times a second. Building your own layout instead? The 4 pieces are also in the custom
    variables `spl_d1` … `spl_d4` (create them first).
+
+Good to know: the ports must match; many apps can send to Companion's port but only one app per computer can listen
+on it; across machines, allow UDP 12321 through the firewall.
 
 Prefer polling? With **Web view** on, `http://<mac-ip>:8080/api/json` returns all values as JSON and
 `/api/level` returns just the number.
