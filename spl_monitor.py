@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.2"
+APP_VERSION = "2.2.1"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -1289,25 +1289,56 @@ class ReorderBar(QtWidgets.QWidget):
         self._marker = QtWidgets.QFrame(self)
         self._marker.setFixedWidth(3); self._marker.hide()
         self.setAcceptDrops(True)
+        self.add_btn = QtWidgets.QPushButton("＋ Divider")
+        self.add_btn.setToolTip("Add a divider at the end of this row, then drag it where you want it")
+        self.add_btn.clicked.connect(lambda: self.add_divider(len(self.order())))
+        self.add_btn.hide()
+        self.lay.addWidget(self.add_btn)
 
     def add(self, key, w):
         w.setProperty("bar_key", key)
         self.items[key] = w
         self.lay.addWidget(w)
+        for t in (getattr(self, "add_btn", None), getattr(self, "tail", None)):   # keep these at the end
+            if t is not None:
+                self.lay.removeWidget(t)
+                self.lay.addWidget(t)
         w.installEventFilter(self)
         for c in w.findChildren(QtWidgets.QWidget):
             c.installEventFilter(self)
         return w
 
     def divider(self, key):
-        f = QtWidgets.QFrame(); f.setFrameShape(QtWidgets.QFrame.VLine)
-        f.setFixedWidth(14); f.setObjectName("bardiv")
-        f.setStyleSheet(f"QFrame#bardiv {{ color:{T['btn_border']}; border:none; "
-                        f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
-                        f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
-                        "margin:3px 0; }")
-        f.setToolTip("Divider. Unlocked: drag it to move, drag it off the bar or right-click to remove.")
+        f = QtWidgets.QFrame(); f.setFrameShape(QtWidgets.QFrame.NoFrame)
+        f.setObjectName("bardiv")
+        f.setToolTip("Divider. Unlocked: drag it to move, click its ✕ (or drag it off the bar) to remove it.")
+        h = QtWidgets.QHBoxLayout(f); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
+        x = QtWidgets.QToolButton(f); x.setText("✕"); x.setAutoRaise(True)
+        x.setProperty("divider_x", True)
+        x.setToolTip("Remove this divider")
+        x.setCursor(QtCore.Qt.PointingHandCursor)
+        x.setStyleSheet(f"QToolButton {{ border:none; background:transparent; color:{T['red']}; "
+                        "font-size:9pt; font-weight:700; padding:0 2px; }")
+        x.clicked.connect(lambda _=False, k=key: self.remove_divider(k))
+        x.hide()
+        h.addStretch(); h.addWidget(x, 0, QtCore.Qt.AlignVCenter); h.addStretch()
+        f._x = x
+        self._style_divider(f, True)
         return self.add(key, f)
+
+    def _style_divider(self, f, locked):
+        """Locked: a thin line. Unlocked: a wider dashed handle with a ✕, easy to grab or remove."""
+        if locked:
+            f.setFixedWidth(14)
+            f.setStyleSheet(f"QFrame#bardiv {{ border:none; "
+                            f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
+                            f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
+                            "margin:3px 0; }")
+        else:
+            f.setFixedWidth(26)
+            f.setStyleSheet(f"QFrame#bardiv {{ border:1px dashed {T['accent']}; border-radius:4px; "
+                            f"background:{T['btn']}; margin:2px 0; }}")
+        f._x.setVisible(not locked)
 
     def sizeHint(self):
         one = self.lay.sizeHint()
@@ -1380,6 +1411,8 @@ class ReorderBar(QtWidgets.QWidget):
         """A widget that always sits after the reorderable items and can't be dragged (the lock button)."""
         self.tail = w
         self.lay.addWidget(w)
+        self.lay.removeWidget(self.add_btn); self.lay.addWidget(self.add_btn)
+        self.lay.removeWidget(w); self.lay.addWidget(w)
 
     def apply_order(self, keys):
         if not keys:
@@ -1396,12 +1429,19 @@ class ReorderBar(QtWidgets.QWidget):
             w = self.items[k]
             self.lay.removeWidget(w)
             self.lay.addWidget(w)
-        if getattr(self, "tail", None) is not None:
-            self.lay.removeWidget(self.tail)
-            self.lay.addWidget(self.tail)
+        for t in (self.add_btn, getattr(self, "tail", None)):     # these always ride at the end
+            if t is not None:
+                self.lay.removeWidget(t)
+                self.lay.addWidget(t)
 
     def set_locked(self, locked):
         self.locked = locked
+        for w in self.items.values():
+            if hasattr(w, "_x"):
+                self._style_divider(w, locked)
+        if getattr(self, "add_btn", None) is not None:
+            self.add_btn.setVisible(not locked)
+            self.updateGeometry()
         for w in self.items.values():
             w.setCursor(QtCore.Qt.ArrowCursor if locked else QtCore.Qt.OpenHandCursor)
             for c in w.findChildren(QtWidgets.QWidget):
@@ -1418,7 +1458,7 @@ class ReorderBar(QtWidgets.QWidget):
         return None
 
     def eventFilter(self, obj, ev):
-        if self.locked:
+        if self.locked or obj.property("divider_x"):      # the ✕ on a divider is a normal button
             return False
         t = ev.type()
         if t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick) \
@@ -4991,6 +5031,42 @@ def merge_cfg(saved):
 BACKUP_KIND = "ServiceSPL settings backup"
 
 
+class CornerGrip(QtWidgets.QWidget):
+    """Bottom-right corner handle that resizes the main window (macOS hides Qt's own size grip, and the native
+    window edge is only a couple of pixels wide)."""
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.setFixedSize(18, 18)
+        self.setCursor(QtCore.Qt.SizeFDiagCursor)
+        self.setToolTip("Drag to resize the window")
+        self._start = None
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.setPen(QtCore.Qt.NoPen); p.setBrush(QtGui.QColor(T["dim"]))
+        for i in range(3):                     # a little triangle of dots, the classic corner grip
+            for j in range(3 - i):
+                p.drawEllipse(QtCore.QPointF(15 - j * 5, 15 - i * 5), 1.4, 1.4)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == QtCore.Qt.LeftButton:
+            self._start = (ev.globalPosition().toPoint(), self.win.size())
+
+    def mouseMoveEvent(self, ev):
+        if self._start:
+            p0, sz = self._start
+            d = ev.globalPosition().toPoint() - p0
+            self.win.resize(max(self.win.minimumSizeHint().width(), sz.width() + d.x()),
+                            max(self.win.minimumSizeHint().height(), sz.height() + d.y()))
+
+    def mouseReleaseEvent(self, ev):
+        self._start = None
+        if hasattr(self.win, "refit_later"):
+            self.win.refit_later(0, 150)
+
+
 class PopupPanel(QtWidgets.QFrame):
     """A panel that floats as a card over the dashboard but never leaves the main window.
     Drag its title bar to move it, the corner grip to resize, ✕ to close. Acts enough like a QDockWidget
@@ -5375,6 +5451,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cal_lbl = QtWidgets.QLabel()
         self.status = self.statusBar()
         self.status.addPermanentWidget(self.cal_lbl)
+        self.status.setSizeGripEnabled(False)          # our own grip works on macOS too
+        self.status.addPermanentWidget(CornerGrip(self))
+        # a 5 px strip just inside the left / right / bottom edges that resizes the window, so you don't have to
+        # find macOS's hairline-thin edge
+        self.setContentsMargins(5, 0, 5, 5)
+        self.setMouseTracking(True)
+        self._edge_drag = None
 
         self.meter = MeterPanel(self)
         self.setCentralWidget(self.meter)
@@ -5534,6 +5617,63 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_bars()
         super().resizeEvent(ev)
         self.refit_later()
+
+    # ---------- easier-to-grab window edges (the 5 px margin around the content)
+    def _edges_at(self, pos):
+        e = QtCore.Qt.Edges()
+        if pos.x() <= 5:
+            e |= QtCore.Qt.LeftEdge
+        elif pos.x() >= self.width() - 6:
+            e |= QtCore.Qt.RightEdge
+        if pos.y() >= self.height() - 6:
+            e |= QtCore.Qt.BottomEdge
+        return e
+
+    def mousePressEvent(self, ev):
+        e = self._edges_at(ev.position().toPoint())
+        if ev.button() == QtCore.Qt.LeftButton and e:
+            self._edge_drag = (e, ev.globalPosition().toPoint(), self.geometry())
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._edge_drag:
+            e, p0, g = self._edge_drag
+            d = ev.globalPosition().toPoint() - p0
+            r = QtCore.QRect(g)
+            mn = self.minimumSizeHint()
+            if e & QtCore.Qt.RightEdge:
+                r.setWidth(max(mn.width(), g.width() + d.x()))
+            if e & QtCore.Qt.LeftEdge:
+                r.setLeft(min(g.left() + d.x(), g.right() - mn.width()))
+            if e & QtCore.Qt.BottomEdge:
+                r.setHeight(max(mn.height(), g.height() + d.y()))
+            self.setGeometry(r)
+            return
+        e = self._edges_at(ev.position().toPoint())
+        if e == (QtCore.Qt.RightEdge | QtCore.Qt.BottomEdge):
+            self.setCursor(QtCore.Qt.SizeFDiagCursor)
+        elif e == (QtCore.Qt.LeftEdge | QtCore.Qt.BottomEdge):
+            self.setCursor(QtCore.Qt.SizeBDiagCursor)
+        elif e & (QtCore.Qt.LeftEdge | QtCore.Qt.RightEdge):
+            self.setCursor(QtCore.Qt.SizeHorCursor)
+        elif e:
+            self.setCursor(QtCore.Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if self._edge_drag:
+            self._edge_drag = None
+            self.refit_later(0, 150)
+            return
+        super().mouseReleaseEvent(ev)
+
+    def leaveEvent(self, ev):
+        if not self._edge_drag:
+            self.unsetCursor()
+        super().leaveEvent(ev)
 
     def refit_later(self, *delays):
         """Re-wrap the toolbars once the window has really settled. On macOS a resize from code (¼ screen, Fit)
