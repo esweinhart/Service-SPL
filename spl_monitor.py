@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.1"
+APP_VERSION = "2.1.1"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -58,6 +58,7 @@ DEFAULTS = dict(
     companion_on=False, companion_host="127.0.0.1", companion_port=12321, companion_button="", companion_layout="one",
     ndi_name="ServiceSPL", ndi_size="1280x720", ndi_transparent=False, ndi_lib="",
     autosave_dir="", autosave_reports=True, schedule=[],
+    pink_source="app", pink_target=85.0,
     pco_app_id="", pco_target=95.0, pco_service_type=None,
     win_geom=None, dock_state=None, bar_order={},
 )
@@ -1124,6 +1125,78 @@ class LoggingComplete(QtWidgets.QWidget):
 
 
 # ---------- toolbar rows whose buttons can be dragged into a new order
+class FlowLayout(QtWidgets.QLayout):
+    """Left-to-right row of widgets that wraps onto more rows when it runs out of width."""
+    def __init__(self, parent=None, spacing=4):
+        super().__init__(parent)
+        self._items = []
+        self._sp = spacing
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientations()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._do(QtCore.QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, r):
+        super().setGeometry(r)
+        self._do(r, False)
+
+    def sizeHint(self):
+        """One row: everything side by side."""
+        m = self.contentsMargins()
+        vis = [it for it in self._items if not it.isEmpty()]
+        w = sum(it.sizeHint().width() for it in vis) + self._sp * max(len(vis) - 1, 0)
+        h = max([it.sizeHint().height() for it in vis] or [0])
+        return QtCore.QSize(w + m.left() + m.right(), h + m.top() + m.bottom())
+
+    def minimumSize(self):
+        """As narrow as the widest single item (the rest wraps)."""
+        m = self.contentsMargins()
+        w = max([it.minimumSize().width() for it in self._items if not it.isEmpty()] or [0])
+        return QtCore.QSize(w + m.left() + m.right(), self.heightForWidth(w + m.left() + m.right()))
+
+    def _do(self, rect, test):
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, row_h = r.x(), r.y(), 0
+        row = []
+
+        def place(row, y, row_h):
+            if not test:
+                for it, xx, sz in row:           # centre each item vertically in its row
+                    it.setGeometry(QtCore.QRect(QtCore.QPoint(xx, y + (row_h - sz.height()) // 2), sz))
+
+        for it in self._items:
+            if it.isEmpty():
+                continue
+            sz = it.sizeHint()
+            if row and x + sz.width() > r.right() + 1:
+                place(row, y, row_h)
+                y += row_h + self._sp
+                x, row_h, row = r.x(), 0, []
+            row.append((it, x, sz))
+            x += sz.width() + self._sp
+            row_h = max(row_h, sz.height())
+        place(row, y, row_h)
+        return y + row_h - rect.y() + m.bottom()
+
+
 class ReorderBar(QtWidgets.QWidget):
     """A row of widgets (buttons, dividers...) that can be dragged into a new order while unlocked.
     The order is saved as a list of keys."""
@@ -1135,8 +1208,9 @@ class ReorderBar(QtWidgets.QWidget):
         self.name = name
         self.setObjectName("reorderbar")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.lay = QtWidgets.QHBoxLayout(self)
-        self.lay.setContentsMargins(2, 2, 2, 2); self.lay.setSpacing(4)
+        self.lay = FlowLayout(self)       # wraps onto a second row when the window is narrow
+        self.lay.setContentsMargins(2, 2, 2, 2)
+        self.avail = None                 # width the toolbar can give us (set by the main window)
         self.items = {}          # key -> widget
         self.locked = True
         self._press = None
@@ -1163,6 +1237,22 @@ class ReorderBar(QtWidgets.QWidget):
         f.setToolTip("Divider")
         return self.add(key, f)
 
+    def sizeHint(self):
+        one = self.lay.sizeHint()
+        if not self.avail or self.avail >= one.width():
+            return one
+        return QtCore.QSize(self.avail, self.lay.heightForWidth(self.avail))
+
+    def minimumSizeHint(self):
+        """Narrow enough to never hold the window open; tall enough for the rows we wrap into."""
+        return QtCore.QSize(self.lay.minimumSize().width(), self.sizeHint().height())
+
+    def set_avail(self, w):
+        w = max(int(w), self.lay.minimumSize().width())
+        if w != self.avail:
+            self.avail = w
+            self.updateGeometry()
+
     def order(self):
         out = []
         for i in range(self.lay.count()):
@@ -1170,6 +1260,11 @@ class ReorderBar(QtWidgets.QWidget):
             if w is not None and w.property("bar_key"):
                 out.append(w.property("bar_key"))
         return out
+
+    def set_tail(self, w):
+        """A widget that always sits after the reorderable items and can't be dragged (the lock button)."""
+        self.tail = w
+        self.lay.addWidget(w)
 
     def apply_order(self, keys):
         if not keys:
@@ -1180,6 +1275,9 @@ class ReorderBar(QtWidgets.QWidget):
             w = self.items[k]
             self.lay.removeWidget(w)
             self.lay.addWidget(w)
+        if getattr(self, "tail", None) is not None:
+            self.lay.removeWidget(self.tail)
+            self.lay.addWidget(self.tail)
 
     def set_locked(self, locked):
         self.locked = locked
@@ -1229,11 +1327,12 @@ class ReorderBar(QtWidgets.QWidget):
         drag.exec(QtCore.Qt.MoveAction)
         self._marker.hide()
 
-    def _drop_index(self, x):
+    def _drop_index(self, pos):
+        x, y = pos.x(), pos.y()
         keys = self.order()
-        for i, k in enumerate(keys):
+        for i, k in enumerate(keys):          # row by row: first item on a lower row, or left of centre on ours
             g = self.items[k].geometry()
-            if x < g.center().x():
+            if y < g.top() - 2 or (y <= g.bottom() + 2 and x < g.center().x()):
                 return i
         return len(keys)
 
@@ -1246,10 +1345,11 @@ class ReorderBar(QtWidgets.QWidget):
             return
         ev.acceptProposedAction()
         keys = self.order()
-        i = self._drop_index(ev.position().x())
-        x = self.items[keys[i]].geometry().left() - 3 if i < len(keys) else self.items[keys[-1]].geometry().right() + 1
+        i = self._drop_index(ev.position())
+        g = self.items[keys[i]].geometry() if i < len(keys) else self.items[keys[-1]].geometry()
+        x = g.left() - 3 if i < len(keys) else g.right() + 1
         self._marker.setStyleSheet(f"background:{T['accent']};")
-        self._marker.setGeometry(max(0, x), 0, 3, self.height())
+        self._marker.setGeometry(max(0, x), g.top(), 3, g.height())
         self._marker.show(); self._marker.raise_()
 
     def dragLeaveEvent(self, ev):
@@ -1261,7 +1361,7 @@ class ReorderBar(QtWidgets.QWidget):
         if key not in self.items:
             return
         keys = self.order()
-        i = self._drop_index(ev.position().x())
+        i = self._drop_index(ev.position())
         old = keys.index(key)
         keys.remove(key)
         keys.insert(i - 1 if i > old else i, key)
@@ -1919,17 +2019,19 @@ class MeterPanel(QtWidgets.QWidget):
         v.addLayout(grid)
         self.banner_until = 0
         self.apply_style()
-        self.setMinimumSize(260, 220)
+        self.setMinimumSize(200, 140)
         self.reflow()
 
     def reflow(self):
         """Scale the big number, thumb and tiles to the window, and re-grid the tiles when narrow / short."""
-        w, h = max(self.width(), 260), max(self.height(), 220)
+        w, h = max(self.width(), 200), max(self.height(), 140)
         cols = 4 if w >= 720 else 2
         small = [self.t_1m, self.t_long, self.t_tot, self.t_clong, self.t_max, self.t_pk, self.t_l10, self.t_l90]
         show = small if h >= 520 or cols == 4 else [self.t_1m, self.t_long, self.t_max, self.t_pk]
         if h < 330:
             show = [self.t_1m, self.t_long] if cols == 2 else small[:4]
+        if h < 210:                       # tiny window: just the big number
+            show = []
         key = (cols, len(show))
         if key != self.cols:
             self.cols = key
@@ -1940,7 +2042,7 @@ class MeterPanel(QtWidgets.QWidget):
                 self.grid.addWidget(t, i // cols, i % cols)
         rows = math.ceil(len(show) / cols)
         tiles_h = rows * (70 if h >= 520 else 52)
-        top_h = max(h - tiles_h - 20, 120)
+        top_h = max(h - tiles_h - 20, 100)
         self.main_tile.set_size(max(20, min(96, top_h * 0.13, w * 0.075)))
         self.thumb.set_size(max(36, min(130, top_h * 0.22, w * 0.12)))
         hist = self.main.cfg["meter_style"] == "history"
@@ -2357,7 +2459,7 @@ class CalWizard(QtWidgets.QDialog):
         lay.addWidget(self.m_cal)
         lay.addWidget(self._note("Put a 94 or 114 dB calibrator on the mic. Takes 5 seconds."))
         lay.addWidget(self.m_ref)
-        lay.addWidget(self._note("No calibrator? ServiceSPL plays pink noise out of your speakers. Hold a trusted "
+        lay.addWidget(self._note("No calibrator? ServiceSPL (or your soundboard) plays pink noise out of your speakers. Hold a trusted "
                                  "SPL meter next to the mic, pick the same weighting and speed as that meter, and "
                                  "type in what it reads."))
         lay.addWidget(self.m_file)
@@ -2471,37 +2573,42 @@ class CalWizard(QtWidgets.QDialog):
         lay.addWidget(self.d_warn)
         lay.addStretch()
 
+    PINK_SOURCES = ("ServiceSPL plays it (out of my speakers)", "My soundboard / console generator plays it")
+
     def _build_ref_page(self):
         lay = self._page("3 · Pink noise + reference SPL meter")
+        top = QtWidgets.QFormLayout()
+        self.r_src = QtWidgets.QComboBox(); self.r_src.addItems(list(self.PINK_SOURCES))
+        self.r_src.setToolTip("Where the pink noise comes from. ServiceSPL only listens either way.")
+        self.r_target = QtWidgets.QDoubleSpinBox(); self.r_target.setRange(60, 110); self.r_target.setDecimals(1)
+        self.r_target.setSingleStep(1); self.r_target.setSuffix(" dB SPL")
+        self.r_target.setToolTip("How loud to make the pink noise at the mic. 85 dB is the cinema / broadcast "
+                                 "habit; 75-80 dB is kinder to small rooms and ears, 90+ dB rides over HVAC noise.")
+        top.addRow("Pink noise comes from", self.r_src)
+        top.addRow("Reference SPL (target)", self.r_target)
+        lay.addLayout(top)
         steps_box = QtWidgets.QScrollArea(); steps_box.setWidgetResizable(True)
         steps_box.setFrameShape(QtWidgets.QFrame.NoFrame); steps_box.setMinimumHeight(150)
         lay.addWidget(steps_box, 1)
-        steps_box.setWidget(self._note(
-            "Calibrate with pink noise from the room speakers\n"
-            "1. Set the TM1's preamp gain and phantom power where you'll leave them for the service. If you change "
-            "the gain later, calibrate again.\n"
-            "2. Put the TM1 on a stand at the main listening position, pointing at the ceiling. Hold or mount your "
-            "handheld meter right next to it, at the same height and pointing the same way.\n"
-            "3. Play pink noise through the main speakers with the Play pink noise button below (pick the output that "
-            "feeds your console or speakers), or use your console's generator. Start with the speakers turned down, "
-            "then play it at about -20 dBFS.\n"
-            "4. Bring the speakers up until the handheld reads about 85 dB. Keep the room quiet: no HVAC blasts, "
-            "talking or walking around.\n"
-            "5. Set the handheld and this page to the same weighting and speed. Z (flat) and Slow is the easiest "
-            "match, or C on both if the handheld has no Z.\n"
-            "6. Press Start meter if it isn't running, and wait until both readings settle.\n"
-            "7. Type in what the handheld reads, then press Measure (10 s). Don't move anything while it measures.\n"
-            "8. Press Next. The reading in the same weighting should match the handheld. Then Save."))
+        self.r_steps = self._note("")
+        steps_box.setWidget(self.r_steps)
         nb = QtWidgets.QGroupBox("Pink noise from your speakers")
         nbl = QtWidgets.QVBoxLayout(nb)
         self.r_noise = NoiseControls(self.main)
         nbl.addWidget(self.r_noise)
         lay.addWidget(nb)
+        self.r_noise_box = nb
+        self.r_ext_note = self._note("Using your soundboard's pink noise: start its generator (pink, not white), "
+                                     "route it to the mains and bring it up. ServiceSPL just listens.")
+        self.r_ext_note.setStyleSheet(f"color:{T['fg']}; font-weight:600;")
+        lay.addWidget(self.r_ext_note)
         f = QtWidgets.QFormLayout()
         self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["Z", "C", "A"])
         self.r_t = QtWidgets.QComboBox(); self.r_t.addItems(["Slow", "Fast"])
         self.r_ref = QtWidgets.QDoubleSpinBox(); self.r_ref.setRange(30, 140); self.r_ref.setDecimals(1)
-        self.r_ref.setValue(85.0); self.r_ref.setSuffix(" dB")
+        self.r_ref.setSuffix(" dB")
+        self.r_ref.setToolTip("Type exactly what the handheld meter shows once it settles (it doesn't have to "
+                              "hit the target)")
         f.addRow("Reference meter weighting", with_tip(self.r_w, "Weighting"))
         f.addRow("Reference meter speed", with_tip(self.r_t, "Speed"))
         f.addRow("Reference meter reads", self.r_ref)
@@ -2522,6 +2629,56 @@ class CalWizard(QtWidgets.QDialog):
         lay.addStretch()
         self.ref_raw = None
         self.ref_busy = False
+        cfg = self.main.cfg
+        i = 1 if cfg.get("pink_source") == "external" else 0
+        self.r_src.setCurrentIndex(i)
+        self.r_target.setValue(float(cfg.get("pink_target", 85.0)))
+        self.r_ref.setValue(self.r_target.value())
+        self.r_src.currentIndexChanged.connect(self._ref_source_changed)
+        self.r_target.valueChanged.connect(self._ref_target_changed)
+        self._ref_source_changed(i, save=False)
+
+    def _ref_steps_text(self):
+        tgt = f"{self.r_target.value():g}"
+        ext = self.r_src.currentIndex() == 1
+        play = ("3. Start your soundboard's pink noise generator (pink, not white) and route it to the main "
+                "speakers. Start with the fader down, then bring the generator to about -20 dBFS on the console's "
+                "meters." if ext else
+                "3. Play pink noise through the main speakers with the Play pink noise button below (pick the output "
+                "that feeds your console or speakers). Start with the speakers turned down, then play it at about "
+                "-20 dBFS.")
+        return ("Calibrate with pink noise from the room speakers\n"
+                "1. Set the mic preamp gain and phantom power where you'll leave them for the service. If you "
+                "change the gain later, calibrate again.\n"
+                "2. Put the mic on a stand at the main listening position, pointing at the ceiling. Hold or mount "
+                "your handheld meter right next to it, at the same height and pointing the same way.\n"
+                f"{play}\n"
+                f"4. Bring the {'fader' if ext else 'speakers'} up until the handheld reads about {tgt} dB (your "
+                "reference SPL above). Keep the room quiet: no HVAC blasts, talking or walking around.\n"
+                "5. Set the handheld and this page to the same weighting and speed. Z (flat) and Slow is the easiest "
+                "match, or C on both if the handheld has no Z.\n"
+                "6. Press Start meter if it isn't running, and wait until both readings settle.\n"
+                "7. Type in exactly what the handheld reads (close to the target is fine), then press Measure (10 s). "
+                "Don't move anything while it measures.\n"
+                "8. Press Next. The reading in the same weighting should match the handheld. Then Save.")
+
+    def _ref_source_changed(self, i, save=True):
+        ext = i == 1
+        if ext:
+            self.r_noise.stop()
+        self.r_noise_box.setVisible(not ext)
+        self.r_ext_note.setVisible(ext)
+        self.r_steps.setText(self._ref_steps_text())
+        if save:
+            self.main.cfg["pink_source"] = "external" if ext else "app"
+            self.main.save_cfg()
+
+    def _ref_target_changed(self, v):
+        if self.ref_raw is None:          # nothing measured yet: the handheld should read about the target
+            self.r_ref.setValue(v)
+        self.r_steps.setText(self._ref_steps_text())
+        self.main.cfg["pink_target"] = float(v)
+        self.main.save_cfg()
 
     # navigation ----------------------------------------------------------
     def show_page(self, i):
@@ -3606,8 +3763,8 @@ Use the <b>90°</b> file when the mic points at the ceiling.</li>
 <li><b>Pink noise from my speakers + a reference SPL meter</b>: gain and phantom set first. Put the
 mic on a stand at the main listening position, pointing at the ceiling, with your handheld meter right next to it
 at the same height. Press <b>Play pink noise</b> on that page (pick the output feeding your speakers, Left + Right) at about -20 dBFS, or
-use your console's generator, and bring the
-speakers up until the handheld reads about 85 dB. Set the handheld and ServiceSPL to the <b>same weighting and
+pick <b>My soundboard plays it</b> to use your console's generator instead, and bring the
+speakers up until the handheld reads about your <b>Reference SPL</b> (85 dB by default; set any level from 60 to 110 dB on that page). Set the handheld and ServiceSPL to the <b>same weighting and
 speed</b> (Z and Slow is easiest, C on both if the handheld has no Z). Wait for the readings to settle, type the
 handheld's reading, press Measure (10 s), check, then Save.</li>
 <li><b>Manual</b>: type the mic's mV/Pa and your interface gain, or an offset you already know.</li></ul>
@@ -4633,7 +4790,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sc.setWidgetResizable(True)
             sc.setFrameShape(QtWidgets.QFrame.NoFrame)
             sc.setWidget(w)
-            sc.setMinimumSize(200, 80)
+            sc.setMinimumSize(120, 16)       # small enough that a quarter-screen window fits every panel
             d.setWidget(sc)
             # no "float": panels always stay inside the main window
             d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetClosable)
@@ -4673,13 +4830,12 @@ class MainWindow(QtWidgets.QMainWindow):
                  lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))):
             b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(fn)
             self.tool_bar.add(key, b)
-        tools.addWidget(self.tool_bar)
-        spacer = QtWidgets.QWidget(); spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        tools.addWidget(spacer)
         self.lock_btn = QtWidgets.QPushButton(); self.lock_btn.setCheckable(True)
         self.lock_btn.setObjectName("lockbtn")
         self.lock_btn.clicked.connect(lambda on: self.set_bars_locked(not on))
-        tools.addWidget(self.lock_btn)
+        self.tool_bar.set_tail(self.lock_btn)   # rides at the end of the row and wraps with the buttons
+        tools.addWidget(self.tool_bar)
+        self.out_lbl = out_lbl
         self.tools_bar = tools
         self.bars = (self.top_bar, self.tool_bar, self.out_bar)
         order = self.cfg.get("bar_order") or {}
@@ -4733,6 +4889,26 @@ class MainWindow(QtWidgets.QMainWindow):
         about.setMenuRole(QtGui.QAction.AboutRole)
         self.refresh_profiles()
         self.apply_cfg_to_ui()
+
+    # ---------- resizing: toolbars wrap onto extra rows instead of setting a huge minimum width
+    def fit_bars(self):
+        w = self.width()
+        if getattr(self, "_fit_w", None) == w:
+            return
+        self._fit_w = w
+        pad = 14 + 2 * self.style().pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
+        self.top_bar.set_avail(w - pad)
+        self.tool_bar.set_avail(w - pad)
+        self.out_bar.set_avail(w - pad - self.out_lbl.sizeHint().width())
+
+    def resizeEvent(self, ev):
+        self.fit_bars()
+        super().resizeEvent(ev)
+
+    def showEvent(self, ev):
+        self._fit_w = None
+        self.fit_bars()
+        super().showEvent(ev)
 
     def restore_layout(self):
         scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
@@ -4987,6 +5163,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                  if locked else "Drag any button (or divider) to move it. Click to lock again.")
         if hasattr(self, "lock_act"):
             self.lock_act.setChecked(locked)
+        if hasattr(self, "out_lbl"):          # the lock button changed width: re-wrap the toolbars
+            self._fit_w = None
+            self.fit_bars()
         if locked:
             self.status.showMessage("Toolbar buttons locked", 2500)
         else:

@@ -90,9 +90,11 @@ itself.
    your handheld meter right next to it, at the same height and pointing the same way.
 3. On the wizard page, pick **Speakers out of** (the output that feeds your console or speakers; the Mac's current
    sound output is picked for you), **Channels** (Left + Right, Left only, Right only or any output number) and
-   **Level** (start at **-20 dBFS** with the speakers turned down), then press **▶ Play pink noise**. Your console's
-   generator works too.
-4. Bring the speakers up until the handheld reads about **85 dB**. Keep the room quiet: no HVAC blasts, talking or
+   **Level** (start at **-20 dBFS** with the speakers turned down), then press **▶ Play pink noise**.
+   **Using your soundboard's generator instead?** Set **Pink noise comes from** to *My soundboard / console generator
+   plays it*: the playback controls hide and ServiceSPL just listens.
+4. Set **Reference SPL (target)** (85 dB by default, anything from 60 to 110 dB; 75-80 dB is kinder to small rooms)
+   and bring the speakers up until the handheld reads about that. Keep the room quiet: no HVAC blasts, talking or
    walking around.
 5. Set the handheld and ServiceSPL to the **same weighting and speed**. **Z (flat) + Slow** is the easiest match,
    or C on both if the handheld has no Z.
@@ -151,6 +153,11 @@ calibrated, and turns yellow when the calibration is more than 30 days old.
 ## 5. Dashboard panels
 Use the **View** menu to show/hide panels. Drag a panel's title bar to move it, drop it on another to stack them as
 tabs. Panels stay inside the main window (no floating windows). The layout is saved when you quit.
+
+**Any window size.** Drag the window as small as about a quarter of a laptop screen (or press **¼ screen**) or as
+big as a 4K/5K display. The toolbars wrap onto extra rows when the window is narrow, the meter drops the small tiles
+and then the history graph as it gets short, and panels shrink down to their title bar and scroll. Hide panels you
+don't need for the tiniest window, or use **Mini ⤡** for a floating always-on-top box.
 
 ### RTA · 1/3 octave
 Weighting Z/A/C, speed Fast/Slow/**Leq** (average since **Reset**). White ticks are peak hold.
