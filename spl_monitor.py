@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -58,8 +58,9 @@ DEFAULTS = dict(
     companion_on=False, companion_host="127.0.0.1", companion_port=12321, companion_button="", companion_layout="one",
     ndi_name="ServiceSPL", ndi_size="1280x720", ndi_transparent=False, ndi_lib="",
     autosave_dir="", autosave_reports=True, schedule=[],
+    pink_source="app", pink_target=85.0,
     pco_app_id="", pco_target=95.0, pco_service_type=None,
-    win_geom=None, dock_state=None, bar_order={},
+    win_geom=None, dock_state=None, bar_order={}, popups={}, vu_skin=False,
 )
 
 # ---------------------------------------------------------------- DSP ----
@@ -643,6 +644,13 @@ def style_sheet():
     return f"""
 QWidget {{ background:{T['bg']}; color:{T['fg']}; font-family:'Segoe UI','Helvetica Neue',Arial; font-size:10pt; }}
 QFrame#tile {{ background:{T['panel']}; border:1px solid {T['border']}; border-radius:6px; }}
+QMainWindow::separator {{ width:9px; height:9px; }}
+QMainWindow::separator:vertical {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
+QMainWindow::separator:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
+QMainWindow::separator:hover {{ background:{T['accent']}; }}
+QSplitter::handle:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
+QSplitter::handle:vertical {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
+QSplitter::handle:hover {{ background:{T['accent']}; }}
 QFrame#tile QLabel {{ background:transparent; }}
 QPushButton, QToolButton {{ background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:4px; padding:5px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background:{T['hover']}; }}
@@ -1016,9 +1024,9 @@ class LoggingComplete(QtWidgets.QWidget):
     DUR = 1600          # ms for the draw-in
     HOLD = 12000        # ms before it fades away by itself
 
-    def __init__(self, host, lines):
+    def __init__(self, host, lines, night=False):
         super().__init__(host)
-        self.host, self.lines = host, lines
+        self.host, self.lines, self.night = host, lines, night
         self.t = 0.0
         self.alpha = 1.0
         rng = np.random.default_rng()
@@ -1067,6 +1075,37 @@ class LoggingComplete(QtWidgets.QWidget):
         cx, cy = self.width() / 2, self.height() * 0.40
         R = max(40.0, min(self.width(), self.height()) * 0.14)
         green = QtGui.QColor(T["green"])
+        if self.night:                     # after-midnight wrap: a moon rises instead of the check mark
+            self._paint_moon(p, cx, cy, R, ease)
+        else:
+            self._paint_check(p, cx, cy, R, ease, green)
+        self._paint_tail(p, cx, cy, R, ease)
+
+    def _paint_moon(self, p, cx, cy, R, ease):
+        rise = ease(self.t / 0.55)
+        y = cy + (1 - rise) * R * 0.8
+        glow = QtGui.QRadialGradient(QtCore.QPointF(cx, y), R * 1.8)
+        glow.setColorAt(0, QtGui.QColor(255, 220, 140, int(90 * rise))); glow.setColorAt(1, QtGui.QColor(255, 220, 140, 0))
+        p.setPen(QtCore.Qt.NoPen); p.setBrush(glow)
+        p.drawEllipse(QtCore.QPointF(cx, y), R * 1.8, R * 1.8)
+        disc = QtGui.QPainterPath(); disc.addEllipse(QtCore.QPointF(cx, y), R, R)
+        bite = QtGui.QPainterPath(); bite.addEllipse(QtCore.QPointF(cx + R * 0.55, y - R * 0.25), R * 0.9, R * 0.9)
+        c = QtGui.QColor("#f4d27a"); c.setAlpha(int(255 * rise))
+        p.setBrush(c)
+        p.drawPath(disc.subtracted(bite))
+        # a little "zz" drifting up once the moon is out
+        z = ease((self.t - 0.5) / 0.5)
+        if z > 0:
+            f = QtGui.QFont(self.font()); f.setBold(True)
+            for i, (dx, dy, sz) in enumerate(((1.15, -0.55, 0.30), (1.45, -0.95, 0.22), (1.7, -1.3, 0.16))):
+                a = min(1.0, max(0.0, z * 3 - i))
+                if a <= 0:
+                    continue
+                f.setPointSizeF(max(8.0, R * sz)); p.setFont(f)
+                p.setPen(QtGui.QColor(220, 228, 240, int(220 * a)))
+                p.drawText(QtCore.QPointF(cx + R * dx * 0.7, y + R * dy * (0.7 + 0.3 * z)), "z")
+
+    def _paint_check(self, p, cx, cy, R, ease, green):
         # 1. ring sweeps around (0 - 45 %)
         ring = ease(self.t / 0.45)
         pen = QtGui.QPen(green, R * 0.12, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap)
@@ -1094,13 +1133,17 @@ class LoggingComplete(QtWidgets.QWidget):
                                 QtCore.Qt.RoundJoin))
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPath(path)
-        # 3. sparks burst outwards (60 - 100 %)
+
+    def _paint_tail(self, p, cx, cy, R, ease):
+        # 3. sparks (or, at night, stars) burst outwards (60 - 100 %)
         burst = (self.t - 0.6) / 0.4
         if 0 < burst <= 1:
             p.setPen(QtCore.Qt.NoPen)
             for ang, spd, size in self.sparks:
                 dist = R * (1.1 + 1.3 * spd * ease(burst))
-                c = QtGui.QColor(T["yellow"] if size > 4.5 else T["green"]); c.setAlpha(int(255 * (1 - burst)))
+                c = QtGui.QColor(("#fff4c8" if size > 4.5 else "#cfe0ff") if self.night else
+                                 (T["yellow"] if size > 4.5 else T["green"]))
+                c.setAlpha(int(255 * (1 - burst)))
                 p.setBrush(c)
                 p.drawEllipse(QtCore.QPointF(cx + math.cos(ang) * dist, cy + math.sin(ang) * dist), size, size)
         # 4. text slides up and fades in (55 - 100 %)
@@ -1111,7 +1154,8 @@ class LoggingComplete(QtWidgets.QWidget):
             p.setFont(f); p.setPen(QtGui.QColor("#ffffff"))
             y0 = cy + R * 1.35 + (1 - tx) * 20
             fh = QtGui.QFontMetricsF(f).height()
-            p.drawText(QtCore.QRectF(0, y0, self.width(), fh * 1.2), QtCore.Qt.AlignHCenter, "Logging Complete")
+            p.drawText(QtCore.QRectF(0, y0, self.width(), fh * 1.2), QtCore.Qt.AlignHCenter,
+                       "That's a wrap, get some sleep" if self.night else "Logging Complete")
             f2 = QtGui.QFont(self.font()); f2.setPointSizeF(max(11.0, R * 0.12))
             p.setFont(f2); p.setPen(QtGui.QColor("#d8dde3"))
             y = y0 + fh * 1.3
@@ -1124,6 +1168,107 @@ class LoggingComplete(QtWidgets.QWidget):
 
 
 # ---------- toolbar rows whose buttons can be dragged into a new order
+class FlowLayout(QtWidgets.QLayout):
+    """Left-to-right row of widgets that wraps onto more rows when it runs out of width."""
+    def __init__(self, parent=None, spacing=4):
+        super().__init__(parent)
+        self._items = []
+        self._sp = spacing
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientations()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._do(QtCore.QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, r):
+        super().setGeometry(r)
+        self._do(r, False)
+
+    def sizeHint(self):
+        """One row: everything side by side."""
+        m = self.contentsMargins()
+        vis = [it for it in self._items if not it.isEmpty()]
+        w = sum(it.sizeHint().width() for it in vis) + self._sp * max(len(vis) - 1, 0)
+        h = max([it.sizeHint().height() for it in vis] or [0])
+        return QtCore.QSize(w + m.left() + m.right(), h + m.top() + m.bottom())
+
+    def minimumSize(self):
+        """As narrow as the widest single item (the rest wraps)."""
+        m = self.contentsMargins()
+        w = max([it.minimumSize().width() for it in self._items if not it.isEmpty()] or [0])
+        return QtCore.QSize(w + m.left() + m.right(), self.heightForWidth(w + m.left() + m.right()))
+
+    def _do(self, rect, test):
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, row_h = r.x(), r.y(), 0
+        row = []
+
+        rows = []
+
+        def place(row, y, row_h):
+            if row:
+                rows.append((y, y + row_h, [it for it, _, _ in row]))
+            if not test:
+                for it, xx, sz in row:           # centre each item vertically in its row
+                    it.setGeometry(QtCore.QRect(QtCore.QPoint(xx, y + (row_h - sz.height()) // 2), sz))
+
+        for it in self._items:
+            if it.isEmpty():
+                continue
+            sz = it.sizeHint()
+            if sz.width() > r.width():          # wider than the whole row (long combo text): squeeze it to fit
+                sz = QtCore.QSize(max(r.width(), it.minimumSize().width()), sz.height())
+            if row and x + sz.width() > r.right() + 1:
+                place(row, y, row_h)
+                y += row_h + self._sp
+                x, row_h, row = r.x(), 0, []
+            row.append((it, x, sz))
+            x += sz.width() + self._sp
+            row_h = max(row_h, sz.height())
+        place(row, y, row_h)
+        if not test:
+            self.rows = rows
+        return y + row_h - rect.y() + m.bottom()
+
+
+def flow_row(*widgets, spacing=6):
+    """A row of widgets that wraps onto more lines in a narrow panel instead of getting cut off."""
+    holder = QtWidgets.QWidget()
+    fl = FlowLayout(holder, spacing)
+    fl.setContentsMargins(0, 0, 0, 0)
+    for w in widgets:
+        fl.addWidget(w)
+    holder.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+    sp = holder.sizePolicy(); sp.setHeightForWidth(True); holder.setSizePolicy(sp)
+    return holder
+
+
+def h_group(*widgets, spacing=4):
+    """Keep a label + control (+ tip) together as one unit inside a flow_row."""
+    g = QtWidgets.QWidget()
+    h = QtWidgets.QHBoxLayout(g); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(spacing)
+    for w in widgets:
+        h.addWidget(w)
+    return g
+
+
 class ReorderBar(QtWidgets.QWidget):
     """A row of widgets (buttons, dividers...) that can be dragged into a new order while unlocked.
     The order is saved as a list of keys."""
@@ -1135,8 +1280,9 @@ class ReorderBar(QtWidgets.QWidget):
         self.name = name
         self.setObjectName("reorderbar")
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        self.lay = QtWidgets.QHBoxLayout(self)
-        self.lay.setContentsMargins(2, 2, 2, 2); self.lay.setSpacing(4)
+        self.lay = FlowLayout(self)       # wraps onto a second row when the window is narrow
+        self.lay.setContentsMargins(2, 2, 2, 2)
+        self.avail = None                 # width the toolbar can give us (set by the main window)
         self.items = {}          # key -> widget
         self.locked = True
         self._press = None
@@ -1160,8 +1306,32 @@ class ReorderBar(QtWidgets.QWidget):
                         f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
                         f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
                         "margin:3px 0; }")
-        f.setToolTip("Divider")
+        f.setToolTip("Divider. Unlocked: drag it to move, drag it off the bar or right-click to remove.")
         return self.add(key, f)
+
+    def sizeHint(self):
+        one = self.lay.sizeHint()
+        if not self.avail or self.avail >= one.width():
+            return one
+        return QtCore.QSize(self.avail, self.lay.heightForWidth(self.avail))
+
+    def minimumSizeHint(self):
+        """Narrow enough to never hold the window open; tall enough for the rows we wrap into."""
+        return QtCore.QSize(self.lay.minimumSize().width(), self.sizeHint().height())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # the toolbar gave us less room than we asked for: wrap for the width we really got
+        if self.avail and 0 < self.width() < self.avail and \
+                self.lay.heightForWidth(self.width()) > self.height():
+            self.avail = max(self.width(), self.lay.minimumSize().width())
+            QtCore.QTimer.singleShot(0, self.updateGeometry)
+
+    def set_avail(self, w):
+        w = max(int(w), self.lay.minimumSize().width())
+        if w != self.avail:
+            self.avail = w
+            self.updateGeometry()
 
     def order(self):
         out = []
@@ -1171,15 +1341,64 @@ class ReorderBar(QtWidgets.QWidget):
                 out.append(w.property("bar_key"))
         return out
 
+    # ---- dividers: add / remove while unlocked
+    def _drop_widget(self, key):
+        w = self.items.pop(key)
+        self.lay.removeWidget(w)
+        w.hide(); w.deleteLater()
+
+    def remove_divider(self, key):
+        if key in self.items and key.startswith("div_"):
+            self._drop_widget(key)
+            self.updateGeometry()
+            self.changed.emit(self.order())
+
+    def add_divider(self, index):
+        key = f"div_u{int(time.time() * 1000) % 10 ** 9}"
+        self.divider(key)
+        self.set_locked(self.locked)
+        keys = [k for k in self.order() if k != key]
+        keys.insert(max(0, min(index, len(keys))), key)
+        self.apply_order(keys)
+        self.updateGeometry()
+        self.changed.emit(keys)
+
+    def contextMenuEvent(self, ev):
+        if self.locked:
+            return super().contextMenuEvent(ev)
+        pos = QtCore.QPointF(self.mapFromGlobal(ev.globalPos()))
+        hit = self._top_item(self.childAt(pos.toPoint()))
+        menu = QtWidgets.QMenu(self)
+        idx = self._drop_index(pos)
+        menu.addAction("Add a divider here", lambda: self.add_divider(idx))
+        if hit is not None and hit.property("bar_key").startswith("div_"):
+            k = hit.property("bar_key")
+            menu.addAction("Remove this divider", lambda: self.remove_divider(k))
+        menu.exec(ev.globalPos())
+
+    def set_tail(self, w):
+        """A widget that always sits after the reorderable items and can't be dragged (the lock button)."""
+        self.tail = w
+        self.lay.addWidget(w)
+
     def apply_order(self, keys):
         if not keys:
             return
+        for k in keys:                                   # dividers you added come back
+            if k.startswith("div_") and k not in self.items:
+                self.divider(k)
+                self.set_locked(self.locked)
+        for k in [k for k in self.items if k.startswith("div_") and k not in keys]:
+            self._drop_widget(k)                         # ...and ones you removed stay gone
         seen = [k for k in keys if k in self.items]
         rest = [k for k in self.order() if k not in seen]
         for k in seen + rest:
             w = self.items[k]
             self.lay.removeWidget(w)
             self.lay.addWidget(w)
+        if getattr(self, "tail", None) is not None:
+            self.lay.removeWidget(self.tail)
+            self.lay.addWidget(self.tail)
 
     def set_locked(self, locked):
         self.locked = locked
@@ -1226,16 +1445,34 @@ class ReorderBar(QtWidgets.QWidget):
         drag.setMimeData(md)
         drag.setPixmap(w.grab())
         drag.setHotSpot(QtCore.QPoint(w.width() // 2, w.height() // 2))
-        drag.exec(QtCore.Qt.MoveAction)
+        res = drag.exec(QtCore.Qt.MoveAction)
         self._marker.hide()
+        key = w.property("bar_key")
+        # a divider dragged off the toolbar and let go somewhere else is removed
+        if res == QtCore.Qt.IgnoreAction and key and key.startswith("div_") \
+                and not self.rect().contains(self.mapFromGlobal(QtGui.QCursor.pos())):
+            self.remove_divider(key)
 
-    def _drop_index(self, x):
+    def _drop_index(self, pos):
+        """Where a dragged button lands: find the row under the pointer, then the gap within that row."""
+        x, y = pos.x(), pos.y()
         keys = self.order()
-        for i, k in enumerate(keys):
-            g = self.items[k].geometry()
-            if x < g.center().x():
-                return i
-        return len(keys)
+        rows = [[it.widget().property("bar_key") for it in r[2]
+                 if it.widget() is not None and it.widget().property("bar_key")]
+                for r in getattr(self.lay, "rows", [])] or [keys]
+        bands = getattr(self.lay, "rows", [(0, self.height(), None)])
+        ri = len(rows) - 1
+        for i, (top, bot, _) in enumerate(bands):
+            if y < bot + self.lay._sp / 2:
+                ri = i
+                break
+        row = [k for k in rows[ri] if k in keys]
+        for k in row:
+            if x < self.items[k].geometry().center().x():
+                return keys.index(k)
+        if not row:
+            return len(keys)
+        return keys.index(row[-1]) + 1
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasFormat(self.MIME) and bytes(ev.mimeData().data(self.MIME)).decode() in self.items:
@@ -1246,10 +1483,11 @@ class ReorderBar(QtWidgets.QWidget):
             return
         ev.acceptProposedAction()
         keys = self.order()
-        i = self._drop_index(ev.position().x())
-        x = self.items[keys[i]].geometry().left() - 3 if i < len(keys) else self.items[keys[-1]].geometry().right() + 1
+        i = self._drop_index(ev.position())
+        g = self.items[keys[i]].geometry() if i < len(keys) else self.items[keys[-1]].geometry()
+        x = g.left() - 3 if i < len(keys) else g.right() + 1
         self._marker.setStyleSheet(f"background:{T['accent']};")
-        self._marker.setGeometry(max(0, x), 0, 3, self.height())
+        self._marker.setGeometry(max(0, x), g.top(), 3, g.height())
         self._marker.show(); self._marker.raise_()
 
     def dragLeaveEvent(self, ev):
@@ -1261,7 +1499,7 @@ class ReorderBar(QtWidgets.QWidget):
         if key not in self.items:
             return
         keys = self.order()
-        i = self._drop_index(ev.position().x())
+        i = self._drop_index(ev.position())
         old = keys.index(key)
         keys.remove(key)
         keys.insert(i - 1 if i > old else i, key)
@@ -1601,6 +1839,290 @@ class Thumb(QtWidgets.QWidget):
         self.r[self.state].render(p, QtCore.QRectF(self.rect()))
 
 
+# ---------- easter eggs: little moments drawn over the big meter (never block clicks, never hide alarms long)
+class EggOverlay(QtWidgets.QWidget):
+    """Transparent layer over the main meter tile: gold-star 'Reference Level Achieved' and the
+    over-110 dB 'needle snapped' glitch with a Warranty Void sticker."""
+    def __init__(self, panel, target):
+        super().__init__(panel)
+        self.panel, self.target = panel, target      # target() -> the widget we draw over right now
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
+        self.kind, self.t0, self.dur = None, 0.0, 1.0
+        self.rng = np.random.default_rng()
+        self.stars = []
+        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._frame)
+        panel.installEventFilter(self)
+        self.hide()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Resize:
+            self.setGeometry(self.target().geometry())
+        return False
+
+    def play(self, kind):
+        self.kind, self.t0 = kind, time.time()
+        self.dur = 2.6 if kind == "ref" else 1.1
+        if kind == "ref":
+            self.stars = [(self.rng.uniform(0, 2 * math.pi), self.rng.uniform(0.35, 1.0), self.rng.uniform(5, 11),
+                           self.rng.uniform(-3, 3)) for _ in range(22)]
+        self.setGeometry(self.target().geometry())
+        self.show(); self.raise_()
+        self.timer.start(16)
+
+    def _frame(self):
+        if time.time() - self.t0 > self.dur:
+            self.timer.stop(); self.hide(); self.kind = None
+        self.update()
+
+    @staticmethod
+    def _star(cx, cy, r):
+        path = QtGui.QPainterPath()
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            rr = r if i % 2 == 0 else r * 0.45
+            pt = QtCore.QPointF(cx + math.cos(a) * rr, cy + math.sin(a) * rr)
+            path.moveTo(pt) if i == 0 else path.lineTo(pt)
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, _):
+        if not self.kind:
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        t = (time.time() - self.t0) / self.dur
+        w, h = self.width(), self.height()
+        if self.kind == "ref":
+            ease = 1 - (1 - min(t * 2.2, 1.0)) ** 3
+            fade = 1.0 if t < 0.75 else max(0.0, (1 - t) / 0.25)
+            cx, cy = w * 0.5, h * 0.42
+            R = min(w, h) * 0.45
+            p.setPen(QtCore.Qt.NoPen)
+            for ang, spd, size, spin in self.stars:
+                d = R * spd * ease
+                c = QtGui.QColor("#ffd34d"); c.setAlpha(int(255 * fade))
+                p.setBrush(c)
+                p.save()
+                p.translate(cx + math.cos(ang) * d, cy + math.sin(ang) * d)
+                p.rotate(spin * 120 * t)
+                p.drawPath(self._star(0, 0, size * (0.6 + 0.4 * ease)))
+                p.restore()
+            p.setOpacity(fade)
+            f = QtGui.QFont(self.font()); f.setBold(True); f.setPointSizeF(max(12.0, min(w * 0.035, h * 0.07)))
+            p.setFont(f)
+            fm = QtGui.QFontMetricsF(f)
+            text = "★  Reference Level Achieved  ★"
+            tw = fm.horizontalAdvance(text) + 36
+            box = QtCore.QRectF(cx - tw / 2, h * 0.72 - fm.height(), tw, fm.height() * 1.6)
+            p.setBrush(QtGui.QColor(20, 16, 4, 200)); p.setPen(QtGui.QPen(QtGui.QColor("#ffd34d"), 2))
+            p.drawRoundedRect(box, 10, 10)
+            p.setPen(QtGui.QColor("#ffd34d"))
+            p.drawText(box, QtCore.Qt.AlignCenter, text)
+        else:   # "glitch": the meter 'breaks' for a moment, then pulls itself together
+            k = max(0.0, 1 - t)
+            for _ in range(int(14 * k) + 2):           # torn scanlines
+                y = self.rng.uniform(0, h); hh = self.rng.uniform(2, 10)
+                c = QtGui.QColor(*(self.rng.integers(120, 255, 3).tolist()), int(90 * k))
+                p.fillRect(QtCore.QRectF(self.rng.uniform(-40, 40), y, w, hh), c)
+            pen = QtGui.QPen(QtGui.QColor(255, 230, 120, int(255 * k)), 2.2)
+            p.setPen(pen)
+            for _ in range(5):                         # sparks zig-zagging off the number
+                x, y = self.rng.uniform(w * 0.45, w * 0.95), self.rng.uniform(h * 0.15, h * 0.5)
+                path = QtGui.QPainterPath(QtCore.QPointF(x, y))
+                for _ in range(4):
+                    x += self.rng.uniform(-24, 24); y += self.rng.uniform(-18, 18)
+                    path.lineTo(x, y)
+                p.drawPath(path)
+            # the sticker, slapped on at an angle in the corner (not over the number)
+            p.save()
+            sw, sh = max(120.0, w * 0.16), max(44.0, w * 0.055)
+            p.translate(w * 0.16, h * 0.72)
+            p.rotate(-12 + 4 * math.sin(t * 20) * k)
+            r = QtCore.QRectF(-sw / 2, -sh / 2, sw, sh)
+            p.setPen(QtGui.QPen(QtGui.QColor("#7a5c00"), 2)); p.setBrush(QtGui.QColor("#ffd21f"))
+            p.drawRoundedRect(r, 6, 6)
+            p.setPen(QtGui.QPen(QtGui.QColor("#111111"), 1, QtCore.Qt.DashLine))
+            p.drawRoundedRect(r.adjusted(4, 4, -4, -4), 4, 4)
+            f = QtGui.QFont(self.font()); f.setBold(True); f.setPointSizeF(sh * 0.30)
+            p.setFont(f); p.setPen(QtGui.QColor("#111111"))
+            p.drawText(r, QtCore.Qt.AlignCenter, "WARRANTY\nVOID")
+            p.restore()
+
+
+class RetroVu(QtWidgets.QWidget):
+    """Secret skin for the big meter: walnut panel, cream VU face, swinging needle, glowing tubes and a little
+    nixie-style readout. All drawn here from scratch."""
+    LO, HI = 40.0, 120.0
+
+    def __init__(self):
+        super().__init__()
+        self.level = float("nan")
+        self.needle = self.LO
+        self.vel = 0.0
+        self.alarm = 100.0
+        self.warn = 95.0
+        self.color = "#e8e8e8"
+        self._last = time.time()
+        rng = np.random.default_rng(7)
+        self.grain = [(rng.uniform(0, 1), rng.uniform(0.002, 0.012), rng.uniform(-0.15, 0.15), rng.uniform(0, 6.28))
+                      for _ in range(70)]
+        self.setMinimumSize(200, 120)
+
+    def set_level(self, v, color, warn, alarm):
+        self.level, self.color, self.warn, self.alarm = v, color, warn, alarm
+        now = time.time(); dt = min(0.1, now - self._last); self._last = now
+        target = v if np.isfinite(v) else self.LO
+        target = min(max(target, self.LO - 2), self.HI + 1.5)
+        # a damped spring: the needle swings up, overshoots a touch and settles, like a real movement
+        k, damp = 90.0, 13.0
+        self.vel += (k * (target - self.needle) - damp * self.vel) * dt
+        self.needle += self.vel * dt
+        self.update()
+
+    def _ang(self, v):                                 # dB -> needle angle (degrees from vertical)
+        f = (min(max(v, self.LO - 2), self.HI + 1.5) - self.LO) / (self.HI - self.LO)
+        return -48 + 96 * f
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        W, H = self.width(), self.height()
+        # walnut panel
+        wood = QtGui.QLinearGradient(0, 0, 0, H)
+        wood.setColorAt(0, QtGui.QColor("#6b3f22")); wood.setColorAt(0.5, QtGui.QColor("#5a321a"))
+        wood.setColorAt(1, QtGui.QColor("#3f2312"))
+        panel = QtCore.QRectF(0, 0, W, H).adjusted(1, 1, -1, -1)
+        p.setPen(QtGui.QPen(QtGui.QColor("#2a160a"), 2)); p.setBrush(wood)
+        p.drawRoundedRect(panel, 10, 10)
+        p.save(); p.setClipRect(panel)
+        for y, thick, tilt, ph in self.grain:
+            c = QtGui.QColor(30, 14, 4, 50)
+            p.setPen(QtGui.QPen(c, max(1.0, thick * H)))
+            path = QtGui.QPainterPath(QtCore.QPointF(0, y * H))
+            for i in range(1, 13):
+                x = W * i / 12
+                path.lineTo(x, y * H + tilt * x * 0.2 + math.sin(ph + i * 0.9) * H * 0.012)
+            p.drawPath(path)
+        p.restore()
+        for sx, sy in ((14, 14), (W - 14, 14), (14, H - 14), (W - 14, H - 14)):   # brass screws
+            g = QtGui.QRadialGradient(QtCore.QPointF(sx - 2, sy - 2), 7)
+            g.setColorAt(0, QtGui.QColor("#f3d98a")); g.setColorAt(1, QtGui.QColor("#8a6a22"))
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(g); p.drawEllipse(QtCore.QPointF(sx, sy), 5, 5)
+            p.setPen(QtGui.QPen(QtGui.QColor("#5a4512"), 1.2)); p.drawLine(QtCore.QPointF(sx - 3, sy + 2), QtCore.QPointF(sx + 3, sy - 2))
+        # layout: face on top, tubes + readout underneath
+        tube_h = max(34.0, H * 0.2)
+        face = QtCore.QRectF(W * 0.08, H * 0.07, W * 0.84, H - tube_h - H * 0.14)
+        fg = QtGui.QLinearGradient(0, face.top(), 0, face.bottom())
+        fg.setColorAt(0, QtGui.QColor("#fbf1d6")); fg.setColorAt(1, QtGui.QColor("#e9d9ae"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#1b120a"), 3)); p.setBrush(fg)
+        p.drawRoundedRect(face, 8, 8)
+        # scale arc
+        cx = face.center().x()
+        R = min(face.width() * 0.48, face.height() * 0.92)
+        cy = face.top() + face.height() * 0.12 + R
+        arc = QtCore.QRectF(cx - R * 0.86, cy - R * 0.86, R * 1.72, R * 1.72)
+        p.setPen(QtGui.QPen(QtGui.QColor("#2b2118"), 2)); p.setBrush(QtCore.Qt.NoBrush)
+        a0, a1 = 90 + 48, 90 - 48
+        a_red = 90 - self._ang(self.alarm)
+        p.drawArc(arc, int(a1 * 16), int((a0 - a1) * 16))
+        p.setPen(QtGui.QPen(QtGui.QColor("#c3261e"), max(4.0, R * 0.05), QtCore.Qt.SolidLine, QtCore.Qt.FlatCap))
+        p.drawArc(arc, int(a1 * 16), int((a_red - a1) * 16))
+        f = QtGui.QFont(self.font()); f.setPointSizeF(max(7.0, R * 0.075)); f.setBold(True)
+        p.setFont(f)
+        for v in range(int(self.LO), int(self.HI) + 1, 5):
+            ang = math.radians(self._ang(v))
+            major = v % 10 == 0
+            r0, r1 = R * 0.86, R * (0.96 if major else 0.92)
+            col = QtGui.QColor("#c3261e" if v >= self.alarm else "#2b2118")
+            p.setPen(QtGui.QPen(col, 2 if major else 1.2))
+            p.drawLine(QtCore.QPointF(cx + math.sin(ang) * r0, cy - math.cos(ang) * r0),
+                       QtCore.QPointF(cx + math.sin(ang) * r1, cy - math.cos(ang) * r1))
+            if major:
+                rt = R * 1.06
+                p.drawText(QtCore.QRectF(cx + math.sin(ang) * rt - 20, cy - math.cos(ang) * rt - 10, 40, 20),
+                           QtCore.Qt.AlignCenter, str(v))
+        f2 = QtGui.QFont(f); f2.setPointSizeF(max(8.0, R * 0.09)); f2.setItalic(True)
+        p.setFont(f2); p.setPen(QtGui.QColor("#2b2118"))
+        p.drawText(QtCore.QRectF(cx - R * 0.5, cy - R * 0.5, R, R * 0.2), QtCore.Qt.AlignCenter, "dB SPL")
+        # needle (+ a soft shadow), pivot cap hidden below the face edge like a real meter
+        ang = math.radians(self._ang(self.needle))
+        tip = QtCore.QPointF(cx + math.sin(ang) * R * 0.95, cy - math.cos(ang) * R * 0.95)
+        base = QtCore.QPointF(cx, cy)
+        p.save(); p.setClipRect(face.adjusted(3, 3, -3, -3))
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 60), 4)); p.drawLine(base + QtCore.QPointF(3, 3), tip + QtCore.QPointF(3, 3))
+        p.setPen(QtGui.QPen(QtGui.QColor("#111111"), 2.2)); p.drawLine(base, tip)
+        p.restore()
+        # glowing tubes, brighter when it's loud
+        lvl = self.level if np.isfinite(self.level) else self.LO
+        heat = min(max((lvl - 55) / 50, 0.08), 1.0)
+        n = 2
+        ty = face.bottom() + H * 0.04
+        tw = max(22.0, tube_h * 0.6)
+        read_w = max(110.0, W * 0.3)
+        xs = [W * 0.5 - read_w / 2 - 18 - tw, W * 0.5 + read_w / 2 + 18]
+        for i in range(n):
+            x = xs[i]
+            body = QtCore.QRectF(x, ty, tw, tube_h)
+            glow = QtGui.QRadialGradient(body.center(), tw * 1.4)
+            flick = 0.85 + 0.15 * math.sin(time.time() * (9 + i * 3))
+            glow.setColorAt(0, QtGui.QColor(255, 150, 40, int(200 * heat * flick)))
+            glow.setColorAt(1, QtGui.QColor(255, 120, 20, 0))
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(glow); p.drawEllipse(body.center(), tw * 1.4, tw * 1.4)
+            glass = QtGui.QLinearGradient(body.left(), 0, body.right(), 0)
+            glass.setColorAt(0, QtGui.QColor(255, 255, 255, 40)); glass.setColorAt(0.5, QtGui.QColor(255, 210, 150, 90))
+            glass.setColorAt(1, QtGui.QColor(255, 255, 255, 30))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 230, 200, 120), 1)); p.setBrush(glass)
+            p.drawRoundedRect(body, tw / 2, tw / 2)
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 170, 60, int(80 + 175 * heat)), 2))
+            p.drawLine(QtCore.QPointF(body.center().x(), body.top() + tube_h * 0.3),
+                       QtCore.QPointF(body.center().x(), body.bottom() - tube_h * 0.2))
+        # nixie-style readout
+        rd = QtCore.QRectF(W * 0.5 - read_w / 2, ty, read_w, tube_h)
+        p.setPen(QtGui.QPen(QtGui.QColor("#1a0d05"), 2)); p.setBrush(QtGui.QColor("#120a06"))
+        p.drawRoundedRect(rd, 6, 6)
+        f3 = QtGui.QFont("Menlo"); f3.setStyleHint(QtGui.QFont.Monospace); f3.setBold(True)
+        f3.setPointSizeF(max(10.0, tube_h * 0.5))
+        p.setFont(f3)
+        txt = fmt(self.level).strip() if np.isfinite(self.level) else "--.-"
+        col = QtGui.QColor("#ff9a3c")
+        if np.isfinite(self.level) and self.level >= self.alarm:
+            col = QtGui.QColor("#ff4a3a")
+        for blur, a in ((3, 60), (1.5, 110)):
+            p.setPen(QtGui.QColor(col.red(), col.green(), col.blue(), a))
+            p.drawText(rd.translated(blur, 0), QtCore.Qt.AlignCenter, txt)
+            p.drawText(rd.translated(-blur, 0), QtCore.Qt.AlignCenter, txt)
+        p.setPen(col); p.drawText(rd, QtCore.Qt.AlignCenter, txt)
+
+
+class KeyCombo(QtCore.QObject):
+    """Watches the arrow keys typed while ServiceSPL is in front; fires when the secret sequence comes up."""
+    SEQ = [QtCore.Qt.Key_Up, QtCore.Qt.Key_Up, QtCore.Qt.Key_Down, QtCore.Qt.Key_Down,
+           QtCore.Qt.Key_Left, QtCore.Qt.Key_Right, QtCore.Qt.Key_Left, QtCore.Qt.Key_Right]
+
+    def __init__(self, main, fn):
+        super().__init__(main)
+        self.main, self.fn, self.buf, self.t = main, fn, [], 0.0
+        self._seen = None
+        QtWidgets.QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.KeyPress and not ev.isAutoRepeat() \
+                and QtWidgets.QApplication.activeWindow() is self.main:
+            fw = QtWidgets.QApplication.focusWidget() or self.main
+            if obj is not fw:                         # a key press reaches several widgets: count it once
+                return False
+            now = time.time()
+            if now - self.t > 2.0:
+                self.buf = []
+            self.t = now
+            self.buf = (self.buf + [ev.key()])[-len(self.SEQ):]
+            if self.buf == self.SEQ:
+                self.buf = []
+                QtCore.QTimer.singleShot(0, self.fn)
+        return False
+
+
 SPEC_LUT = None
 
 
@@ -1899,11 +2421,21 @@ class MeterPanel(QtWidgets.QWidget):
         hr = QtWidgets.QHBoxLayout()
         hr.addWidget(self.thumb); hr.addWidget(self.main_tile.v, 1)
         ml.insertLayout(1, hr)
+        self.thumb_row = hr
         self.history = HistoryStrip(main.cfg["history_secs"])
         self.bar = LevelBar()
         ml.addWidget(self.history, 1)
         ml.addWidget(self.bar)
         v.addWidget(self.main_tile, 3)
+        # secret retro VU skin (arrow-key combo), same slot as the main tile
+        self.vu_box = QtWidgets.QWidget()
+        vb = QtWidgets.QHBoxLayout(self.vu_box); vb.setContentsMargins(0, 0, 0, 0); vb.setSpacing(8)
+        self.vu = RetroVu()
+        self.vu_row = vb
+        vb.addWidget(self.vu, 1)
+        self.vu_box.hide()
+        v.addWidget(self.vu_box, 3)
+        self.eggs = EggOverlay(self, lambda: self.vu_box if self.vu_box.isVisible() else self.main_tile)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(6)
         self.t_1m = Tile("LAeq 1 min", tip="A-weighted equivalent level over the last minute")
@@ -1919,17 +2451,20 @@ class MeterPanel(QtWidgets.QWidget):
         v.addLayout(grid)
         self.banner_until = 0
         self.apply_style()
-        self.setMinimumSize(260, 220)
+        self.setMinimumSize(200, 140)
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)    # clicking the meter takes focus off the toolbar combos
         self.reflow()
 
     def reflow(self):
         """Scale the big number, thumb and tiles to the window, and re-grid the tiles when narrow / short."""
-        w, h = max(self.width(), 260), max(self.height(), 220)
+        w, h = max(self.width(), 200), max(self.height(), 140)
         cols = 4 if w >= 720 else 2
         small = [self.t_1m, self.t_long, self.t_tot, self.t_clong, self.t_max, self.t_pk, self.t_l10, self.t_l90]
         show = small if h >= 520 or cols == 4 else [self.t_1m, self.t_long, self.t_max, self.t_pk]
         if h < 330:
             show = [self.t_1m, self.t_long] if cols == 2 else small[:4]
+        if h < 210:                       # tiny window: just the big number
+            show = []
         key = (cols, len(show))
         if key != self.cols:
             self.cols = key
@@ -1940,7 +2475,7 @@ class MeterPanel(QtWidgets.QWidget):
                 self.grid.addWidget(t, i // cols, i % cols)
         rows = math.ceil(len(show) / cols)
         tiles_h = rows * (70 if h >= 520 else 52)
-        top_h = max(h - tiles_h - 20, 120)
+        top_h = max(h - tiles_h - 20, 100)
         self.main_tile.set_size(max(20, min(96, top_h * 0.13, w * 0.075)))
         self.thumb.set_size(max(36, min(130, top_h * 0.22, w * 0.12)))
         hist = self.main.cfg["meter_style"] == "history"
@@ -1953,6 +2488,19 @@ class MeterPanel(QtWidgets.QWidget):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self.reflow()
+
+    def set_vu(self, on):
+        """Swap the big number for the retro VU skin (the thumb comes along)."""
+        if on == self.vu_box.isVisible():
+            return
+        if on:
+            self.thumb_row.removeWidget(self.thumb)
+            self.vu_row.insertWidget(0, self.thumb, 0, QtCore.Qt.AlignVCenter)
+        else:
+            self.vu_row.removeWidget(self.thumb)
+            self.thumb_row.insertWidget(0, self.thumb)
+        self.main_tile.setVisible(not on)
+        self.vu_box.setVisible(on)
 
     def tiles(self):
         return [self.main_tile, self.t_1m, self.t_long, self.t_tot, self.t_clong,
@@ -1993,10 +2541,10 @@ class RtaPanel(QtWidgets.QWidget):
         rst.clicked.connect(self.reset)
         for w in (self.w, self.sp):
             w.setMinimumWidth(70)
-        for lab, wdg, key in (("Weighting", self.w, "Weighting"), ("Speed", self.sp, "RTA speed")):
-            row.addWidget(QtWidgets.QLabel(lab)); row.addWidget(wdg); row.addWidget(InfoTip(GLOSSARY[key]))
-            row.addSpacing(6)
-        row.addWidget(rst); row.addStretch(); row.addWidget(InfoTip(GLOSSARY["RTA"]))
+        groups = [h_group(QtWidgets.QLabel(lab), wdg, InfoTip(GLOSSARY[key]))
+                  for lab, wdg, key in (("Weighting", self.w, "Weighting"), ("Speed", self.sp, "RTA speed"))]
+        row.addWidget(flow_row(*groups, rst, spacing=10), 1)
+        row.addWidget(InfoTip(GLOSSARY["RTA"]), 0, QtCore.Qt.AlignTop)
         v.addLayout(row)
         self.rta = RtaWidget()
         v.addWidget(self.rta, 1)
@@ -2165,7 +2713,6 @@ class SessionPanel(QtWidgets.QWidget):
         c = main.cfg
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
-        top = QtWidgets.QHBoxLayout()
         self.info = QtWidgets.QLabel("")
         self.view = QtWidgets.QComboBox()
         self.views = {"Last 10 min": 600, "Last hour": 3600, "Last 4 hours": 14400, "Whole session": 0}
@@ -2179,10 +2726,7 @@ class SessionPanel(QtWidgets.QWidget):
         epdf = QtWidgets.QPushButton("PDF report…"); epdf.clicked.connect(lambda: main.export_pdf())
         sch = QtWidgets.QPushButton("Schedule…"); sch.setToolTip("Start and stop logging by time (e.g. every Sunday)")
         sch.clicked.connect(lambda: main.edit_schedule())
-        top.addWidget(self.info, 1)
-        for w in (self.view, mk, new, ecsv, epdf, sch):
-            top.addWidget(w)
-        v.addLayout(top)
+        v.addWidget(flow_row(self.info, self.view, mk, new, ecsv, epdf, sch))
         meta = QtWidgets.QHBoxLayout()
         self.venue = QtWidgets.QLineEdit(c["venue"]); self.venue.setPlaceholderText("Venue / show / room")
         self.oper = QtWidgets.QLineEdit(c["operator"]); self.oper.setPlaceholderText("Operator")
@@ -2190,10 +2734,15 @@ class SessionPanel(QtWidgets.QWidget):
         self.oper.textChanged.connect(lambda s: c.__setitem__("operator", s))
         meta.addWidget(self.venue, 2); meta.addWidget(self.oper, 1)
         v.addLayout(meta)
-        split = QtWidgets.QHBoxLayout()
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)   # drag the line between graph and markers/alarms
+        split.setChildrenCollapsible(False)
+        side_min = 150
+        split.setHandleWidth(9)
         self.graph = SessionGraph(main)
-        split.addWidget(self.graph, 3)
-        side = QtWidgets.QVBoxLayout()
+        split.addWidget(self.graph)
+        self.graph.setMinimumWidth(120)
+        side_w = QtWidgets.QWidget(); side_w.setMinimumWidth(side_min)
+        side = QtWidgets.QVBoxLayout(side_w); side.setContentsMargins(0, 0, 0, 0)
         side.addWidget(QtWidgets.QLabel("Markers & events"))
         self.events = QtWidgets.QListWidget()
         side.addWidget(self.events, 1)
@@ -2201,7 +2750,11 @@ class SessionPanel(QtWidgets.QWidget):
         self.rules = QtWidgets.QTableWidget(0, 3)
         self.rules.setHorizontalHeaderLabels(["On", "Metric", "≥ dB / %"])
         self.rules.verticalHeader().setVisible(False)
-        self.rules.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hh = self.rules.horizontalHeader()
+        hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        hh.setMinimumSectionSize(30)
         side.addWidget(self.rules, 1)
         rb = QtWidgets.QHBoxLayout()
         add = QtWidgets.QPushButton("+"); add.clicked.connect(self.add_rule)
@@ -2210,9 +2763,23 @@ class SessionPanel(QtWidgets.QWidget):
         self.beep.toggled.connect(lambda on: c.__setitem__("alarm_beep", on))
         rb.addWidget(add); rb.addWidget(rem); rb.addStretch(); rb.addWidget(self.beep)
         side.addLayout(rb)
-        split.addLayout(side, 2)
-        v.addLayout(split, 1)
+        split.addWidget(side_w)
+        split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
+        sizes = main.cfg.get("session_split")
+        if sizes and len(sizes) == 2 and min(sizes) >= 60:
+            split.setSizes(sizes)
+        split.splitterMoved.connect(lambda *_: main.cfg.__setitem__("session_split", split.sizes())
+                                    if min(split.sizes()) >= 60 else None)
+        v.addWidget(split, 1)
+        self.split = split
         self.load_rules()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # narrow panel: put the markers / alarms under the graph instead of beside it
+        o = QtCore.Qt.Vertical if self.width() < 620 else QtCore.Qt.Horizontal
+        if self.split.orientation() != o:
+            self.split.setOrientation(o)
 
     def _view(self, t):
         self.main.cfg["session_view"] = self.views[t]
@@ -2225,7 +2792,7 @@ class SessionPanel(QtWidgets.QWidget):
         for i, r in enumerate(rs):
             cb = QtWidgets.QCheckBox(); cb.setChecked(r["on"])
             cb.toggled.connect(self.save_rules)
-            cell = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(cell); h.setContentsMargins(6, 0, 0, 0)
+            cell = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(cell); h.setContentsMargins(8, 0, 8, 0)
             h.addWidget(cb)
             self.rules.setCellWidget(i, 0, cell)
             m = QtWidgets.QComboBox(); m.addItems(ALARM_METRICS); m.setCurrentText(r["metric"])
@@ -2357,7 +2924,7 @@ class CalWizard(QtWidgets.QDialog):
         lay.addWidget(self.m_cal)
         lay.addWidget(self._note("Put a 94 or 114 dB calibrator on the mic. Takes 5 seconds."))
         lay.addWidget(self.m_ref)
-        lay.addWidget(self._note("No calibrator? ServiceSPL plays pink noise out of your speakers. Hold a trusted "
+        lay.addWidget(self._note("No calibrator? ServiceSPL (or your soundboard) plays pink noise out of your speakers. Hold a trusted "
                                  "SPL meter next to the mic, pick the same weighting and speed as that meter, and "
                                  "type in what it reads."))
         lay.addWidget(self.m_file)
@@ -2471,37 +3038,42 @@ class CalWizard(QtWidgets.QDialog):
         lay.addWidget(self.d_warn)
         lay.addStretch()
 
+    PINK_SOURCES = ("ServiceSPL plays it (out of my speakers)", "My soundboard / console generator plays it")
+
     def _build_ref_page(self):
         lay = self._page("3 · Pink noise + reference SPL meter")
+        top = QtWidgets.QFormLayout()
+        self.r_src = QtWidgets.QComboBox(); self.r_src.addItems(list(self.PINK_SOURCES))
+        self.r_src.setToolTip("Where the pink noise comes from. ServiceSPL only listens either way.")
+        self.r_target = QtWidgets.QDoubleSpinBox(); self.r_target.setRange(60, 110); self.r_target.setDecimals(1)
+        self.r_target.setSingleStep(1); self.r_target.setSuffix(" dB SPL")
+        self.r_target.setToolTip("How loud to make the pink noise at the mic. 85 dB is the cinema / broadcast "
+                                 "habit; 75-80 dB is kinder to small rooms and ears, 90+ dB rides over HVAC noise.")
+        top.addRow("Pink noise comes from", self.r_src)
+        top.addRow("Reference SPL (target)", self.r_target)
+        lay.addLayout(top)
         steps_box = QtWidgets.QScrollArea(); steps_box.setWidgetResizable(True)
         steps_box.setFrameShape(QtWidgets.QFrame.NoFrame); steps_box.setMinimumHeight(150)
         lay.addWidget(steps_box, 1)
-        steps_box.setWidget(self._note(
-            "Calibrate with pink noise from the room speakers\n"
-            "1. Set the TM1's preamp gain and phantom power where you'll leave them for the service. If you change "
-            "the gain later, calibrate again.\n"
-            "2. Put the TM1 on a stand at the main listening position, pointing at the ceiling. Hold or mount your "
-            "handheld meter right next to it, at the same height and pointing the same way.\n"
-            "3. Play pink noise through the main speakers with the Play pink noise button below (pick the output that "
-            "feeds your console or speakers), or use your console's generator. Start with the speakers turned down, "
-            "then play it at about -20 dBFS.\n"
-            "4. Bring the speakers up until the handheld reads about 85 dB. Keep the room quiet: no HVAC blasts, "
-            "talking or walking around.\n"
-            "5. Set the handheld and this page to the same weighting and speed. Z (flat) and Slow is the easiest "
-            "match, or C on both if the handheld has no Z.\n"
-            "6. Press Start meter if it isn't running, and wait until both readings settle.\n"
-            "7. Type in what the handheld reads, then press Measure (10 s). Don't move anything while it measures.\n"
-            "8. Press Next. The reading in the same weighting should match the handheld. Then Save."))
+        self.r_steps = self._note("")
+        steps_box.setWidget(self.r_steps)
         nb = QtWidgets.QGroupBox("Pink noise from your speakers")
         nbl = QtWidgets.QVBoxLayout(nb)
         self.r_noise = NoiseControls(self.main)
         nbl.addWidget(self.r_noise)
         lay.addWidget(nb)
+        self.r_noise_box = nb
+        self.r_ext_note = self._note("Using your soundboard's pink noise: start its generator (pink, not white), "
+                                     "route it to the mains and bring it up. ServiceSPL just listens.")
+        self.r_ext_note.setStyleSheet(f"color:{T['fg']}; font-weight:600;")
+        lay.addWidget(self.r_ext_note)
         f = QtWidgets.QFormLayout()
         self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["Z", "C", "A"])
         self.r_t = QtWidgets.QComboBox(); self.r_t.addItems(["Slow", "Fast"])
         self.r_ref = QtWidgets.QDoubleSpinBox(); self.r_ref.setRange(30, 140); self.r_ref.setDecimals(1)
-        self.r_ref.setValue(85.0); self.r_ref.setSuffix(" dB")
+        self.r_ref.setSuffix(" dB")
+        self.r_ref.setToolTip("Type exactly what the handheld meter shows once it settles (it doesn't have to "
+                              "hit the target)")
         f.addRow("Reference meter weighting", with_tip(self.r_w, "Weighting"))
         f.addRow("Reference meter speed", with_tip(self.r_t, "Speed"))
         f.addRow("Reference meter reads", self.r_ref)
@@ -2522,6 +3094,56 @@ class CalWizard(QtWidgets.QDialog):
         lay.addStretch()
         self.ref_raw = None
         self.ref_busy = False
+        cfg = self.main.cfg
+        i = 1 if cfg.get("pink_source") == "external" else 0
+        self.r_src.setCurrentIndex(i)
+        self.r_target.setValue(float(cfg.get("pink_target", 85.0)))
+        self.r_ref.setValue(self.r_target.value())
+        self.r_src.currentIndexChanged.connect(self._ref_source_changed)
+        self.r_target.valueChanged.connect(self._ref_target_changed)
+        self._ref_source_changed(i, save=False)
+
+    def _ref_steps_text(self):
+        tgt = f"{self.r_target.value():g}"
+        ext = self.r_src.currentIndex() == 1
+        play = ("3. Start your soundboard's pink noise generator (pink, not white) and route it to the main "
+                "speakers. Start with the fader down, then bring the generator to about -20 dBFS on the console's "
+                "meters." if ext else
+                "3. Play pink noise through the main speakers with the Play pink noise button below (pick the output "
+                "that feeds your console or speakers). Start with the speakers turned down, then play it at about "
+                "-20 dBFS.")
+        return ("Calibrate with pink noise from the room speakers\n"
+                "1. Set the mic preamp gain and phantom power where you'll leave them for the service. If you "
+                "change the gain later, calibrate again.\n"
+                "2. Put the mic on a stand at the main listening position, pointing at the ceiling. Hold or mount "
+                "your handheld meter right next to it, at the same height and pointing the same way.\n"
+                f"{play}\n"
+                f"4. Bring the {'fader' if ext else 'speakers'} up until the handheld reads about {tgt} dB (your "
+                "reference SPL above). Keep the room quiet: no HVAC blasts, talking or walking around.\n"
+                "5. Set the handheld and this page to the same weighting and speed. Z (flat) and Slow is the easiest "
+                "match, or C on both if the handheld has no Z.\n"
+                "6. Press Start meter if it isn't running, and wait until both readings settle.\n"
+                "7. Type in exactly what the handheld reads (close to the target is fine), then press Measure (10 s). "
+                "Don't move anything while it measures.\n"
+                "8. Press Next. The reading in the same weighting should match the handheld. Then Save.")
+
+    def _ref_source_changed(self, i, save=True):
+        ext = i == 1
+        if ext:
+            self.r_noise.stop()
+        self.r_noise_box.setVisible(not ext)
+        self.r_ext_note.setVisible(ext)
+        self.r_steps.setText(self._ref_steps_text())
+        if save:
+            self.main.cfg["pink_source"] = "external" if ext else "app"
+            self.main.save_cfg()
+
+    def _ref_target_changed(self, v):
+        if self.ref_raw is None:          # nothing measured yet: the handheld should read about the target
+            self.r_ref.setValue(v)
+        self.r_steps.setText(self._ref_steps_text())
+        self.main.cfg["pink_target"] = float(v)
+        self.main.save_cfg()
 
     # navigation ----------------------------------------------------------
     def show_page(self, i):
@@ -3606,8 +4228,8 @@ Use the <b>90°</b> file when the mic points at the ceiling.</li>
 <li><b>Pink noise from my speakers + a reference SPL meter</b>: gain and phantom set first. Put the
 mic on a stand at the main listening position, pointing at the ceiling, with your handheld meter right next to it
 at the same height. Press <b>Play pink noise</b> on that page (pick the output feeding your speakers, Left + Right) at about -20 dBFS, or
-use your console's generator, and bring the
-speakers up until the handheld reads about 85 dB. Set the handheld and ServiceSPL to the <b>same weighting and
+pick <b>My soundboard plays it</b> to use your console's generator instead, and bring the
+speakers up until the handheld reads about your <b>Reference SPL</b> (85 dB by default; set any level from 60 to 110 dB on that page). Set the handheld and ServiceSPL to the <b>same weighting and
 speed</b> (Z and Slow is easiest, C on both if the handheld has no Z). Wait for the readings to settle, type the
 handheld's reading, press Measure (10 s), check, then Save.</li>
 <li><b>Manual</b>: type the mic's mV/Pa and your interface gain, or an offset you already know.</li></ul>
@@ -3835,7 +4457,6 @@ class PcoPanel(QtWidgets.QWidget):
         self.client = None
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
-        g = QtWidgets.QGridLayout()
         self.app_id = QtWidgets.QLineEdit(c["pco_app_id"]); self.app_id.setPlaceholderText("Application ID")
         self.secret = QtWidgets.QLineEdit(); self.secret.setEchoMode(QtWidgets.QLineEdit.Password)
         self.secret.setPlaceholderText("Secret")
@@ -3857,12 +4478,16 @@ class PcoPanel(QtWidgets.QWidget):
         self.target = QtWidgets.QDoubleSpinBox(); self.target.setRange(60, 130); self.target.setValue(c["pco_target"])
         self.target.setPrefix("Item target LAeq "); self.target.setSuffix(" dB")
         self.target.valueChanged.connect(lambda x: c.__setitem__("pco_target", x))
-        g.addWidget(self.app_id, 0, 0); g.addWidget(self.secret, 0, 1); g.addWidget(con, 0, 2)
-        g.addWidget(self.st, 1, 0); g.addWidget(self.plan, 1, 1); g.addWidget(self.follow, 1, 2)
-        g.addWidget(self.target, 2, 0)
-        hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.show_secret); hb.addWidget(tok); hb.addWidget(hlp)
-        g.addLayout(hb, 2, 1, 1, 2)
-        v.addLayout(g)
+        for w in (self.app_id, self.secret):
+            w.setMinimumWidth(120)
+        self.app_id.sizeHint = lambda: QtCore.QSize(220, QtWidgets.QLineEdit.sizeHint(self.app_id).height())
+        self.secret.sizeHint = lambda: QtCore.QSize(220, QtWidgets.QLineEdit.sizeHint(self.secret).height())
+        for cb in (self.st, self.plan):
+            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(18)
+        v.addWidget(flow_row(self.app_id, self.secret, self.show_secret, con))
+        v.addWidget(flow_row(self.st, self.plan, self.follow))
+        v.addWidget(flow_row(self.target, tok, hlp))
         self.status = QtWidgets.QLabel("Not connected")
         self.now = QtWidgets.QLabel("—")
         self.now.setWordWrap(True)
@@ -4009,11 +4634,21 @@ WEB_PAGE = """<!DOCTYPE html>
 <style>
 html,body{margin:0;height:100%;background:#121417;color:#e8e8e8;
   font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden}
-#wrap{display:flex;align-items:center;height:100%;padding:0 3vw;gap:3vw;box-sizing:border-box}
-#thumb{height:min(70vh,28vw);flex:none}
-#right{flex:1;text-align:right}
-#val{font-family:Consolas,Menlo,monospace;font-weight:700;font-size:min(55vh,16vw);line-height:1;white-space:nowrap}
-#sub{color:#8a9099;font-size:min(9vh,2.4vw);white-space:nowrap}
+/* thumb and number sit together in the middle and scale with the window (any width or height) */
+#wrap{display:flex;align-items:center;justify-content:center;height:100%;padding:0 2vw;
+  gap:min(2vw,3vh);box-sizing:border-box}
+#thumb{height:min(70vh,26vw);flex:none}
+#right{flex:none;text-align:left;min-width:0}
+#val{font-family:Consolas,Menlo,monospace;font-weight:700;font-size:min(55vh,19vw);line-height:1;white-space:nowrap}
+#sub{color:#8a9099;font-size:min(9vh,3vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* tall and skinny: thumb on top of the number */
+@media (max-aspect-ratio:4/5){
+ #wrap{flex-direction:column;gap:2vh}
+ #thumb{height:min(40vh,45vw)}
+ #right{text-align:center}
+ #val{font-size:min(30vh,24vw)}
+ #sub{font-size:min(5vh,5vw)}
+}
 </style></head><body>
 <div id="wrap"><div id="thumb"></div><div id="right"><div id="val">--.-</div><div id="sub">connecting…</div></div></div>
 <script>
@@ -4356,6 +4991,134 @@ def merge_cfg(saved):
 BACKUP_KIND = "ServiceSPL settings backup"
 
 
+class PopupPanel(QtWidgets.QFrame):
+    """A panel that floats as a card over the dashboard but never leaves the main window.
+    Drag its title bar to move it, the corner grip to resize, ✕ to close. Acts enough like a QDockWidget
+    (toggleViewAction, windowTitle, show/hide) to sit in MainWindow.docks."""
+    def __init__(self, title, widget, host, key, default_size=(460, 420)):
+        super().__init__(host)
+        self.host, self.key, self.default_size = host, key, default_size
+        self.setObjectName("popuppanel")
+        self.setWindowTitle(title)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36); shadow.setOffset(0, 6); shadow.setColor(QtGui.QColor(0, 0, 0, 150))
+        self.setGraphicsEffect(shadow)
+        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(10, 6, 10, 6); v.setSpacing(4)
+        head = QtWidgets.QWidget(); head.setObjectName("popuphead"); head.setCursor(QtCore.Qt.SizeAllCursor)
+        hl = QtWidgets.QHBoxLayout(head); hl.setContentsMargins(2, 0, 0, 0)
+        self.title = QtWidgets.QLabel(title)
+        x = QtWidgets.QToolButton(); x.setText("✕"); x.setAutoRaise(True); x.setToolTip("Close")
+        x.setCursor(QtCore.Qt.PointingHandCursor); x.clicked.connect(self.hide)
+        hl.addWidget(self.title, 1); hl.addWidget(x)
+        v.addWidget(head)
+        sc = QtWidgets.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sc.setWidget(widget)
+        v.addWidget(sc, 1)
+        grip_row = QtWidgets.QHBoxLayout(); grip_row.setContentsMargins(0, 0, 0, 0)
+        grip_row.addStretch(); grip_row.addWidget(QtWidgets.QSizeGrip(self), 0, QtCore.Qt.AlignRight)
+        v.addLayout(grip_row)
+        self._head = head
+        head.installEventFilter(self)
+        self.title.installEventFilter(self)
+        self._drag = None
+        self._act = QtGui.QAction(title, self); self._act.setCheckable(True)
+        self._act.toggled.connect(lambda on: self.setVisible(on) if on != self.isVisible() else None)
+        host.installEventFilter(self)
+        self.setMinimumSize(220, 140)
+        self.refresh_theme()
+        self._placed = False
+        self.hide()
+        g = (host.cfg.get("popups") or {}).get(key)
+        if g and g.get("rect"):
+            self.setGeometry(*g["rect"])
+            self._placed = True
+
+    def refresh_theme(self):
+        self.setStyleSheet(f"QFrame#popuppanel {{ background:{T['bg']}; border:1px solid {T['btn_border']}; "
+                           "border-radius:10px; }"
+                           "QLabel { background:transparent; font-weight:700; }")
+
+    # dock-widget look-alikes
+    def toggleViewAction(self):
+        return self._act
+
+    def isFloating(self):
+        return False
+
+    def setFloating(self, _):
+        pass
+
+    def setVisible(self, on):
+        if on and not self._placed:
+            r = self.host.centralWidget().geometry() if self.host.centralWidget() else self.host.rect()
+            w, h = self.default_size
+            self.setGeometry(r.right() - w - 16, r.top() + 16, w, h)
+            self._placed = True
+        super().setVisible(on)
+        if on:
+            self.keep_inside()
+            self.raise_()
+        if self._act.isChecked() != on:
+            self._act.setChecked(on)
+        self.save()
+
+    def keep_inside(self):
+        """Stay inside the dashboard area (below the toolbars, above the bottom bar); shrink if it got smaller."""
+        r = self.host.rect().adjusted(4, 4, -4, -4)
+        try:
+            top = max(tb.geometry().bottom() for tb in (self.host.findChild(QtWidgets.QToolBar, "toolbar"),
+                                                         self.host.tools_bar) if tb is not None and tb.isVisible())
+            bottom = self.host.outputs_bar.geometry().top()
+            r = QtCore.QRect(r.left(), top + 4, r.width(), max(120, bottom - top - 8))
+        except Exception:
+            pass
+        g = self.geometry()
+        w, h = min(g.width(), r.width()), min(g.height(), r.height())
+        x = min(max(g.x(), r.left()), r.right() - w + 1)
+        y = min(max(g.y(), r.top()), r.bottom() - h + 1)
+        if (x, y, w, h) != (g.x(), g.y(), g.width(), g.height()):
+            self.setGeometry(x, y, w, h)
+
+    def save(self):
+        if self._placed:
+            g = self.geometry()
+            self.host.cfg.setdefault("popups", {})[self.key] = dict(rect=[g.x(), g.y(), g.width(), g.height()],
+                                                                     visible=self.isVisible())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.save()
+
+    def moveEvent(self, ev):
+        super().moveEvent(ev)
+        self.save()
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if obj is self.host:
+            if t == QtCore.QEvent.Resize and self.isVisible():
+                QtCore.QTimer.singleShot(0, self.keep_inside)     # after the toolbars have re-wrapped
+            return False
+        if t == QtCore.QEvent.MouseButtonPress and ev.button() == QtCore.Qt.LeftButton:
+            self._drag = ev.globalPosition().toPoint() - self.pos()
+            self.raise_()
+            return True
+        if t == QtCore.QEvent.MouseMove and self._drag is not None:
+            self.move(ev.globalPosition().toPoint() - self._drag)
+            self.keep_inside()
+            return True
+        if t == QtCore.QEvent.MouseButtonRelease and self._drag is not None:
+            self._drag = None
+            self.save()
+            return True
+        return False
+
+    def mousePressEvent(self, ev):
+        self.raise_()
+        super().mousePressEvent(ev)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -4390,7 +5153,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sched_skip = set()
         self._sched_stopping = False
         self._last_sec = 0
+        self._ref_since, self._ref_armed, self._glitch_next = None, True, 0.0
         self._build_ui()
+        self.combo = KeyCombo(self, self.toggle_vu_skin)
+        if self.cfg.get("vu_skin"):
+            self.meter.set_vu(True)
         self.populate_devices()
         self.restore_layout()
         self.update_menubar_meter()
@@ -4531,7 +5298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for t in self.meter.tiles():
             t.refresh_theme()
         self.meter.apply_style()
-        for w in (self.dose_panel, self.mini, self.pco_panel):
+        for w in (self.dose_panel, self.mini, self.pco_panel, self.docks["dose"], self.docks["pco"]):
             if w is not None:
                 w.refresh_theme()
         self.apply_cfg_to_ui()
@@ -4561,8 +5328,6 @@ class MainWindow(QtWidgets.QMainWindow):
         rst.clicked.connect(self.reset_stats)
         self.log_btn = QtWidgets.QPushButton("●  Log"); self.log_btn.setObjectName("log")
         self.log_btn.setCheckable(True); self.log_btn.clicked.connect(self.toggle_log)
-        mk = QtWidgets.QPushButton("◆ Marker"); mk.setToolTip("Drop a marker in the session and log (M)")
-        mk.clicked.connect(lambda: self.add_marker())
         red = QtWidgets.QWidget()
         rl = QtWidgets.QHBoxLayout(red); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(2)
         lbl = QtWidgets.QLabel("  Red at ")
@@ -4577,7 +5342,7 @@ class MainWindow(QtWidgets.QMainWindow):
         st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
         self.top_bar = ReorderBar("top")
         for key, w in (("input", self.dev), ("channel", self.ch), ("start", self.run_btn), ("profile", self.prof_cb),
-                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn), ("marker", mk)):
+                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
             self.top_bar.add(key, w)
         self.top_bar.divider("div_top1")
         self.top_bar.add("red_at", red)
@@ -4601,7 +5366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addToolBar(QtCore.Qt.BottomToolBarArea, bottom)
         out_lbl = QtWidgets.QLabel("  Show the meter on:  ")
         out_lbl.setObjectName("outlbl")
-        bottom.addWidget(out_lbl)
+        self.out_lbl_act = bottom.addWidget(out_lbl)
         self.out_bar = ReorderBar("outputs")
         for key, w in (("mini", self.mini_btn), ("web", self.web_btn), ("ndi", self.ndi_btn)):
             self.out_bar.add(key, w)
@@ -4622,10 +5387,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.docks = {}
         for name, title, w, area in (("rta", "RTA · 1/3 octave", self.rta_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("spectro", "Spectrogram", self.spectro_panel, QtCore.Qt.RightDockWidgetArea),
-                                     ("dose", "Dosimeter · OSHA / NIOSH", self.dose_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("session", "Session · markers · alarms · export", self.session_panel,
-                                      QtCore.Qt.BottomDockWidgetArea),
-                                     ("pco", "Service · Planning Center Live", self.pco_panel,
                                       QtCore.Qt.BottomDockWidgetArea)):
             d = QtWidgets.QDockWidget(title, self)
             d.setObjectName("dock_" + name)
@@ -4633,15 +5395,16 @@ class MainWindow(QtWidgets.QMainWindow):
             sc.setWidgetResizable(True)
             sc.setFrameShape(QtWidgets.QFrame.NoFrame)
             sc.setWidget(w)
-            sc.setMinimumSize(200, 80)
+            sc.setMinimumSize(120, 16)       # small enough that a quarter-screen window fits every panel
             d.setWidget(sc)
             # no "float": panels always stay inside the main window
             d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetClosable)
             self.addDockWidget(area, d)
             self.docks[name] = d
         self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Vertical)
-        self.splitDockWidget(self.docks["spectro"], self.docks["dose"], QtCore.Qt.Vertical)
-        self.splitDockWidget(self.docks["session"], self.docks["pco"], QtCore.Qt.Horizontal)
+        # Dosimeter and Planning Center: pop-up cards that float over the dashboard, inside the window
+        self.docks["dose"] = PopupPanel("Dosimeter · OSHA / NIOSH", self.dose_panel, self, "dose", (420, 520))
+        self.docks["pco"] = PopupPanel("Service · Planning Center Live", self.pco_panel, self, "pco", (620, 480))
         if not self.cfg.get("dock_state"):
             QtCore.QTimer.singleShot(0, self.default_dock_sizes)
 
@@ -4651,12 +5414,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addToolBar(tools)
         self.tool_actions = {}
         self.tool_bar = ReorderBar("tools")
+        self.pop_bar = ReorderBar("popups")     # pop-up cards: right side of the bottom bar
         for name, short in (("rta", "RTA 1/3 oct"), ("div_rta", None), ("spectro", "Spectrogram"),
-                            ("dose", "Dosimeter"), ("session", "Session"), ("pco", "Planning Center"),
-                            ("div_view", None)):
+                            ("session", "Session"), ("div_view", None), ("dose", "Dosimeter"),
+                            ("pco", "Planning Center")):
             if short is None:
                 self.tool_bar.divider(name)
                 continue
+            bar = self.pop_bar if name in ("dose", "pco") else self.tool_bar
             d = self.docks[name]
             btn = QtWidgets.QPushButton(short); btn.setCheckable(True); btn.setObjectName("panelbtn")
             btn.setToolTip(f"Show or hide the {d.windowTitle()} panel")
@@ -4664,48 +5429,55 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setChecked(tva.isChecked())
             tva.toggled.connect(btn.setChecked)
             btn.clicked.connect(lambda on, d=d: (d.show(), d.raise_()) if on else d.hide())
-            self.tool_bar.add(name, btn)
+            bar.add(name, btn)
             self.tool_actions[name] = btn
         for key, text, tip, fn in (
-                ("show_all", "Show all", "Show every panel", lambda: [d.show() for d in self.docks.values()]),
+                ("show_all", "Show all", "Show every docked panel", lambda: [d.show() for d in self.docked()]),
                 ("quarter", "¼ screen", "Shrink the window to a quarter of the screen", self.quarter_size),
                 ("fit", "Fit", "Fill the screen without going past its edges",
                  lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))):
             b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(fn)
             self.tool_bar.add(key, b)
-        tools.addWidget(self.tool_bar)
-        spacer = QtWidgets.QWidget(); spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        tools.addWidget(spacer)
         self.lock_btn = QtWidgets.QPushButton(); self.lock_btn.setCheckable(True)
         self.lock_btn.setObjectName("lockbtn")
+        self.lock_btn.setStyleSheet("QPushButton#lockbtn { padding:5px 9px; font-size:12pt; }")
         self.lock_btn.clicked.connect(lambda on: self.set_bars_locked(not on))
-        tools.addWidget(self.lock_btn)
+        self.tool_bar.set_tail(self.lock_btn)   # rides at the end of the row and wraps with the buttons
+        tools.addWidget(self.tool_bar)
+        self.out_lbl = out_lbl
         self.tools_bar = tools
-        self.bars = (self.top_bar, self.tool_bar, self.out_bar)
+        bottom_spacer = QtWidgets.QWidget()
+        bottom_spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.outputs_bar.addWidget(bottom_spacer)
+        self.outputs_bar.addWidget(self.pop_bar)
+        self.bars = (self.top_bar, self.tool_bar, self.out_bar, self.pop_bar)
         order = self.cfg.get("bar_order") or {}
         for bar in self.bars:
+            bar.defaults = bar.order()               # for "Reset toolbar button order"
             bar.apply_order(order.get(bar.name))
             bar.changed.connect(lambda keys, bar=bar: self.save_bar_order(bar, keys))
         self.set_bars_locked(True)
 
         mb = self.menuBar()
         fm = mb.addMenu("&File")
-        fm.addAction("Export session CSV…", lambda: self.export_csv())
-        fm.addAction("Export PDF report…", lambda: self.export_pdf())
+        fm.addAction("Export session CSV…", lambda: self.export_csv(), QtGui.QKeySequence("Ctrl+E"))
+        fm.addAction("Export PDF report…", lambda: self.export_pdf(), QtGui.QKeySequence("Ctrl+P"))
         fm.addAction("New session", lambda: self.new_session())
         fm.addSeparator()
         fm.addAction("Export settings…", lambda: self.export_settings())
         fm.addAction("Import settings…", lambda: self.import_settings())
         fm.addSeparator()
-        fm.addAction("Settings…", self.settings)
+        fm.addAction("Settings…", self.settings, QtGui.QKeySequence("Ctrl+,"))
         vm = mb.addMenu("&View")
+        for i, k in enumerate(("rta", "spectro", "session", "dose", "pco"), 1):    # ⌘1-⌘5 show / hide panels
+            self.docks[k].toggleViewAction().setShortcut(QtGui.QKeySequence(f"Ctrl+{i}"))
         for d in self.docks.values():
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
-        vm.addAction("Show all panels", lambda: [d.show() for d in self.docks.values()])
+        vm.addAction("Show all panels", lambda: [d.show() for d in self.docked()])
         vm.addAction("Hide all panels", lambda: [d.hide() for d in self.docks.values()])
         vm.addSeparator()
-        vm.addAction("Mini meter", self.enter_mini)
+        vm.addAction("Mini meter", self.enter_mini, QtGui.QKeySequence("Ctrl+Shift+M"))
         self.web_act = vm.addAction("Web view", lambda: self.web_btn.click())
         self.ndi_act = vm.addAction("NDI output", lambda: self.ndi_btn.click())
         vm.addSeparator()
@@ -4716,16 +5488,20 @@ class MainWindow(QtWidgets.QMainWindow):
         vm.addAction("Quarter-screen size", self.quarter_size)
         vm.addAction("Fit to screen", lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))
         tm = mb.addMenu("&Tools")
+        tm.addAction("Start / stop meter", lambda: self.run_btn.click(), QtGui.QKeySequence("Ctrl+R"))
+        tm.addAction("Log on / off", lambda: self.log_btn.click(), QtGui.QKeySequence("Ctrl+L"))
+        tm.addSeparator()
         tm.addAction("Calibration wizard…", self.calibrate)
         tm.addAction("Calibrate with pink noise from my speakers…", self.calibrate_pink)
         tm.addAction("Drop marker", lambda: self.add_marker(), QtGui.QKeySequence("M"))
         tm.addAction("Marker with note…", self.add_marker_note, QtGui.QKeySequence("Shift+M"))
-        tm.addAction("Reset Leq / Max / Peak", self.reset_stats)
+        tm.addAction("Reset Leq / Max / Peak", self.reset_stats, QtGui.QKeySequence("Ctrl+Shift+R"))
         tm.addAction("Reset dose", self.dose_panel.reset)
         tm.addAction("Logging schedule…", self.edit_schedule)
         tm.addAction("Start service item…", self.pco_panel.manual_item)
         hm = mb.addMenu("&Help")
         hm.addAction("Guide…", lambda: self.guide())
+        hm.addAction("Keyboard shortcuts…", self.show_shortcuts, QtGui.QKeySequence("Ctrl+/"))
         hm.addAction("Room EQ helper…", lambda: self.guide("Room EQ"))
         hm.addAction("Calibrate with pink noise from my speakers…", self.calibrate_pink)
         hm.addSeparator()
@@ -4733,6 +5509,102 @@ class MainWindow(QtWidgets.QMainWindow):
         about.setMenuRole(QtGui.QAction.AboutRole)
         self.refresh_profiles()
         self.apply_cfg_to_ui()
+
+    # ---------- resizing: toolbars wrap onto extra rows instead of setting a huge minimum width
+    def fit_bars(self):
+        w = self.width()
+        if getattr(self, "_fit_w", None) == w:
+            return
+        self._fit_w = w
+        pad = 14 + 2 * self.style().pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
+        self.top_bar.set_avail(w - pad)
+        self.tool_bar.set_avail(w - pad)
+        self.out_lbl_act.setVisible(w >= 640)      # narrow window: drop the label, keep the buttons
+        rest = w - pad - (self.out_lbl.sizeHint().width() if w >= 640 else 0) - 12
+        one_out, one_pop = self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
+        if one_out + one_pop <= rest:
+            self.out_bar.set_avail(one_out); self.pop_bar.set_avail(one_pop)
+        else:                                       # share the row so each side wraps evenly
+            self.out_bar.set_avail(rest // 2); self.pop_bar.set_avail(rest - rest // 2)
+
+    def resizeEvent(self, ev):
+        self.fit_bars()
+        super().resizeEvent(ev)
+
+    def showEvent(self, ev):
+        self._fit_w = None
+        self.fit_bars()
+        super().showEvent(ev)
+
+    SHORTCUTS = [
+        ("Meter", [("Ctrl+R", "Start / stop the meter"), ("Ctrl+L", "Logging on / off"),
+                   ("Ctrl+Shift+R", "Reset Leq / Max / Peak / Ln")]),
+        ("Session", [("M", "Drop a marker"), ("Shift+M", "Marker with a note"),
+                     ("Ctrl+E", "Export session CSV"), ("Ctrl+P", "PDF report")]),
+        ("Panels", [("Ctrl+1", "RTA"), ("Ctrl+2", "Spectrogram"), ("Ctrl+3", "Session"),
+                    ("Ctrl+4", "Dosimeter pop-up"), ("Ctrl+5", "Planning Center pop-up"),
+                    ("Ctrl+Shift+M", "Mini meter")]),
+        ("App", [("Ctrl+,", "Settings"), ("Ctrl+/", "This list"), ("Esc", "Close a pop-up box")]),
+    ]
+
+    def show_shortcuts(self):
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle("Keyboard shortcuts")
+        v = QtWidgets.QVBoxLayout(d)
+        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(18); grid.setVerticalSpacing(6)
+        row = 0
+        for section, items in self.SHORTCUTS:
+            h = QtWidgets.QLabel(section)
+            h.setStyleSheet(f"color:{T['dim']}; font-weight:700; font-size:9pt; padding-top:6px;")
+            grid.addWidget(h, row, 0, 1, 2); row += 1
+            for keys, what in items:
+                k = QtWidgets.QLabel(QtGui.QKeySequence(keys).toString(QtGui.QKeySequence.NativeText) or keys)
+                k.setStyleSheet(f"background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:5px; "
+                                f"padding:2px 8px; {MONO} font-weight:600;")
+                k.setAlignment(QtCore.Qt.AlignCenter)
+                grid.addWidget(k, row, 0)
+                grid.addWidget(QtWidgets.QLabel(what), row, 1)
+                row += 1
+        grid.setColumnStretch(1, 1)
+        v.addLayout(grid)
+        note = QtWidgets.QLabel("M and Shift+M work anywhere except while you're typing in a text box.")
+        note.setWordWrap(True); note.setStyleSheet(f"color:{T['dim']};")
+        v.addWidget(note)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(d.reject)
+        v.addWidget(bb)
+        exec_in_window(d)
+
+    # ---------- easter eggs
+    def easter_eggs(self, main, now):
+        eg = self.meter.eggs
+        # 1. hold exactly 85.0 dBA for 3 seconds: Reference Level Achieved
+        on_ref = self.cfg["main_weight"] == "A" and np.isfinite(main) and f"{main:.1f}" == "85.0"
+        if on_ref:
+            if self._ref_since is None:
+                self._ref_since = now
+            if now - self._ref_since >= 3.0 and self._ref_armed and eg.kind is None:
+                self._ref_armed = False
+                eg.play("ref")
+        else:
+            self._ref_since = None
+            if not np.isfinite(main) or abs(main - 85.0) > 1.0:
+                self._ref_armed = True            # wander off and come back to earn it again
+        # 4. over 110 dB: the meter 'breaks' for a second (at most once a minute; real alarms carry on)
+        if np.isfinite(main) and main > 110.0 and now >= self._glitch_next and eg.kind is None:
+            self._glitch_next = now + 60.0
+            eg.play("glitch")
+
+    def toggle_vu_skin(self):
+        on = not self.meter.vu_box.isVisible()
+        self.meter.set_vu(on)
+        self.cfg["vu_skin"] = on
+        self.save_cfg()
+        self.status.showMessage("Retro VU skin on. Same keys again to switch back." if on
+                                else "Retro VU skin off.", 5000)
+
+    def docked(self):
+        return [d for d in self.docks.values() if isinstance(d, QtWidgets.QDockWidget)]
 
     def restore_layout(self):
         scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
@@ -4749,14 +5621,17 @@ class MainWindow(QtWidgets.QMainWindow):
         for d in self.docks.values():          # panels that were floating in 2.0 come back inside the window
             if d.isFloating():
                 d.setFloating(False)
+        pops = self.cfg.get("popups") or {}
+        for key in ("dose", "pco"):              # pop-up cards come back the way you left them
+            if (pops.get(key) or {}).get("visible"):
+                QtCore.QTimer.singleShot(0, self.docks[key].show)
         self.fit_to_screen()
 
     def default_dock_sizes(self):
         w, h = self.width(), self.height()
         self.resizeDocks([self.docks["rta"]], [int(w * 0.32)], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["session"], self.docks["pco"]], [int(w * 0.62), int(w * 0.38)], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["rta"], self.docks["spectro"], self.docks["dose"]],
-                         [int(h * 0.36), int(h * 0.24), int(h * 0.34)], QtCore.Qt.Vertical)
+        self.resizeDocks([self.docks["rta"], self.docks["spectro"]],
+                         [int(h * 0.5), int(h * 0.4)], QtCore.Qt.Vertical)
         self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
 
     def quarter_size(self):
@@ -4982,11 +5857,17 @@ class MainWindow(QtWidgets.QMainWindow):
         for bar in self.bars:
             bar.set_locked(locked)
         self.lock_btn.blockSignals(True); self.lock_btn.setChecked(not locked); self.lock_btn.blockSignals(False)
-        self.lock_btn.setText("🔒 Locked" if locked else "🔓 Drag to reorder")
+        self.lock_btn.setText("🔒" if locked else "🔓")
         self.lock_btn.setToolTip("Buttons are locked. Click to unlock, then drag buttons into a new order."
-                                 if locked else "Drag any button (or divider) to move it. Click to lock again.")
+                                 if locked else "Unlocked: drag any button (or divider) to move it. Click to lock again.")
+        if not locked:
+            self.status.showMessage("Toolbar unlocked: drag buttons and dividers into a new order. Right-click to add "
+                                    "or remove a divider (or drag one off the bar). Click 🔓 to lock.", 9000)
         if hasattr(self, "lock_act"):
             self.lock_act.setChecked(locked)
+        if hasattr(self, "out_lbl"):          # the lock button changed width: re-wrap the toolbars
+            self._fit_w = None
+            self.fit_bars()
         if locked:
             self.status.showMessage("Toolbar buttons locked", 2500)
         else:
@@ -4999,7 +5880,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def reset_bar_order(self):
         self.cfg["bar_order"] = {}
         for bar in self.bars:
-            bar.apply_order(list(bar.items))
+            bar.apply_order(bar.defaults)
         self.save_cfg()
 
     def settings(self):
@@ -5256,7 +6137,10 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append(f"Saved to {os.path.basename(path)}")
         if self.cfg["autosave_dir"] and self.cfg["autosave_reports"]:
             lines.append("Report auto-saved")
-        self._done_anim = LoggingComplete(self, lines)
+        night = datetime.datetime.now().hour < 4      # wrapped between midnight and 4 AM
+        if night:
+            lines.insert(0, "Logging complete. Go home, the room will still be here tomorrow.")
+        self._done_anim = LoggingComplete(self, lines, night=night)
 
     def write_log(self):
         """Every N seconds write one row: Leq / max / peak / Ln over that interval, plus markers."""
@@ -5453,6 +6337,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thumb.setState("bad" if now < self.bad_until else "good")
         col = T["red"] if now < self.bad_until else self.color_for(main)
         m.main_tile.set(main, col)
+        if m.vu_box.isVisible():
+            m.vu.set_level(main, col, self.cfg["alarm"] - self.cfg["warn_gap"], self.cfg["alarm"])
+        self.easter_eggs(main, now)
         w, t = self.cfg["main_weight"], self.cfg["main_time"]
         sub = (f"L{w}{t}  ·  1 min {fmt(self.last_1m).strip()}  ·  red at {self.cfg['alarm']:.0f}"
                + ("  ·  ● REC" if self.log_writer else ""))

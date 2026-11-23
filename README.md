@@ -23,9 +23,17 @@ needed) and on Windows.
 - Dashboard layout: every panel can be shown, hidden, dragged or stacked, always inside the main window. Every
   popup (settings, calibration, schedule, guide, messages) opens inside the main window too; only the Mini meter,
   the Web view (a browser) and NDI live outside it. Follows macOS light/dark.
-- A second toolbar row has one button per panel (RTA | Spectrogram, Dosimeter, Session, Planning Center), plus **¼ screen** and **Fit**
-- Toolbar buttons can be **dragged into your own order**: click **🔒 Locked** (end of the second row) to unlock, drag, click again to lock
-- **Mini**, **Web view** and **NDI** sit in their own bar at the bottom of the window
+- A second toolbar row has one button per docked panel (RTA | Spectrogram, Session), plus **Show all**, **¼ screen** and **Fit**
+- **Dosimeter** and **Planning Center** open as pop-up cards over the dashboard (drag the title to move, corner to
+  resize, ✕ to close). They never leave the main window and reopen where you left them. Their buttons sit on the
+  right of the bottom bar
+- Toolbar buttons can be **dragged into your own order**: click the **🔒** (end of the second row) to unlock, drag,
+  click again to lock. While unlocked, right-click a toolbar to **add a divider**, right-click a divider (or drag it
+  off the bar) to **remove** it
+- **Mini**, **Web view** and **NDI** sit on the left of the bottom bar
+- Drag the thin lines between the meter and the panels (they light up on hover) to resize them
+- **Help → Keyboard shortcuts…** (⌘/): ⌘R start/stop, ⌘L log, ⌘⇧R reset, M / ⇧M marker, ⌘E CSV, ⌘P PDF,
+  ⌘1-⌘5 panels, ⌘⇧M Mini, ⌘, Settings
 - Little **!** marks next to readings and settings: hover over one for a plain-English explanation of LAeq, LAFmax, LCpeak, L10/L90, A/C/Z weighting, Fast/Slow, dose, TWA, dBFS and more
 - A built-in **Guide** (**Help → Guide…**) walks you through all of this inside the app
 
@@ -90,9 +98,11 @@ itself.
    your handheld meter right next to it, at the same height and pointing the same way.
 3. On the wizard page, pick **Speakers out of** (the output that feeds your console or speakers; the Mac's current
    sound output is picked for you), **Channels** (Left + Right, Left only, Right only or any output number) and
-   **Level** (start at **-20 dBFS** with the speakers turned down), then press **▶ Play pink noise**. Your console's
-   generator works too.
-4. Bring the speakers up until the handheld reads about **85 dB**. Keep the room quiet: no HVAC blasts, talking or
+   **Level** (start at **-20 dBFS** with the speakers turned down), then press **▶ Play pink noise**.
+   **Using your soundboard's generator instead?** Set **Pink noise comes from** to *My soundboard / console generator
+   plays it*: the playback controls hide and ServiceSPL just listens.
+4. Set **Reference SPL (target)** (85 dB by default, anything from 60 to 110 dB; 75-80 dB is kinder to small rooms)
+   and bring the speakers up until the handheld reads about that. Keep the room quiet: no HVAC blasts, talking or
    walking around.
 5. Set the handheld and ServiceSPL to the **same weighting and speed**. **Z (flat) + Slow** is the easiest match,
    or C on both if the handheld has no Z.
@@ -151,6 +161,11 @@ calibrated, and turns yellow when the calibration is more than 30 days old.
 ## 5. Dashboard panels
 Use the **View** menu to show/hide panels. Drag a panel's title bar to move it, drop it on another to stack them as
 tabs. Panels stay inside the main window (no floating windows). The layout is saved when you quit.
+
+**Any window size.** Drag the window as small as about a quarter of a laptop screen (or press **¼ screen**) or as
+big as a 4K/5K display. The toolbars wrap onto extra rows when the window is narrow, the meter drops the small tiles
+and then the history graph as it gets short, and panels shrink down to their title bar and scroll. Hide panels you
+don't need for the tiniest window, or use **Mini ⤡** for a floating always-on-top box.
 
 ### RTA · 1/3 octave
 Weighting Z/A/C, speed Fast/Slow/**Leq** (average since **Reset**). White ticks are peak hold.
@@ -273,7 +288,9 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 
 ### Web view (e.g. the Axis Proton)
 1. Click **Web view**. A box shows the address, e.g. `http://192.168.1.50:8080`. Allow incoming connections if macOS asks.
-2. On the Proton, open Edge at that address: a big thumb and number that update 5×/second and fit any window.
+2. On the Proton, open Edge at that address: a big thumb and number that update 5×/second and fit any window
+   (side by side when wide, thumb on top when tall). Browsers won't make a window narrower than about 400-500 px;
+   an OBS / ProPresenter browser source can be any size.
 3. Clean window: a desktop shortcut with
    `"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --app=http://192.168.1.50:8080`
 - Use the regular LAN, not the SoundGrid port. Give the Mac a fixed IP (DHCP reservation).
