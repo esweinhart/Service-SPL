@@ -2,7 +2,7 @@
 ServiceSPL - pro sound level meter for Mac and Windows.
 
 Main meter + Leq / Ln statistics, calibration wizard with per-mic profiles (UMIK-style cal files),
-1/3-octave RTA + spectrogram, OSHA/NIOSH dosimeter, theater calibration (pink noise generator),
+1/3-octave RTA + spectrogram, OSHA/NIOSH dosimeter, pink-noise speaker calibration,
 session logging with markers and alarms (CSV + PDF report), mini meter, menu-bar meter, web view.
 
 Requires: numpy, scipy, PySide6, sounddevice
@@ -10,7 +10,7 @@ Optional on Mac: pyobjc-framework-Cocoa (live number in the menu bar)
 """
 
 import sys, os, re, json, time, csv, queue, math, datetime, socket, threading, base64, collections, array, copy
-import struct, subprocess, ctypes, urllib.request, urllib.parse
+import struct, subprocess, ctypes, urllib.request, urllib.parse, urllib.error, ssl
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 from scipy import signal
@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -53,14 +53,13 @@ DEFAULTS = dict(
                  dict(on=True, metric="LCpeak", thr=135.0),
                  dict(on=False, metric="LCeq long", thr=115.0)],
     rta_weight="Z", rta_speed="F", spec_top=100.0, spec_range=70.0,
-    theater=dict(layout="5.1", preset="Cinema / dub stage", noise="SMPTE band-limited (500 Hz - 2 kHz)",
-                 level=-20.0, out_device=None, outputs={}, targets={}),
+    noise=dict(out_device=None, channels="Left + Right", level=-20.0),
     session_view=600, venue="", operator="",
-    companion_on=False, companion_host="127.0.0.1", companion_port=12321, companion_button="",
+    companion_on=False, companion_host="127.0.0.1", companion_port=12321, companion_button="", companion_layout="one",
     ndi_name="ServiceSPL", ndi_size="1280x720", ndi_transparent=False, ndi_lib="",
     autosave_dir="", autosave_reports=True, schedule=[],
     pco_app_id="", pco_target=95.0, pco_service_type=None,
-    win_geom=None, dock_state=None,
+    win_geom=None, dock_state=None, bar_order={},
 )
 
 # ---------------------------------------------------------------- DSP ----
@@ -548,28 +547,34 @@ class NoisePlayer:
             return self.buf[idx] * self.gain
 
     def open(self, device, ch):
-        """device None = no audio out (simulator reads the noise directly)."""
+        """device None = no audio out (simulator reads the noise directly). ch: one output index or a list
+        (e.g. [0, 1] for left + right)."""
         self.close()
-        self.ch = ch
+        chs = list(ch) if isinstance(ch, (list, tuple)) else [ch]
+        self.ch = chs[0]
         if device is None or sd is None:
             return 48000
         info = sd.query_devices(device)
         fs = int(info["default_samplerate"])
         api = sd.query_hostapis(info["hostapi"])["name"]
+        nout = info["max_output_channels"]
+        if "ASIO" not in api:
+            if nout == 1:
+                chs = [0]                      # mono output: play it there
+            elif max(chs) + 1 > nout:
+                raise RuntimeError(f"That output only has {nout} channel(s).")
 
         def cb(out, frames, t, status):
             out.fill(0)
-            col = 0 if "ASIO" in api else self.ch
-            out[:, col] = self.read(frames)
+            x = self.read(frames)
+            for col in (range(len(chs)) if "ASIO" in api else chs):
+                out[:, col] = x
 
         if "ASIO" in api:
-            self.stream = sd.OutputStream(device=device, channels=1, samplerate=fs, dtype="float32",
-                                          callback=cb, extra_settings=sd.AsioSettings(channel_selectors=[ch]))
+            self.stream = sd.OutputStream(device=device, channels=len(chs), samplerate=fs, dtype="float32",
+                                          callback=cb, extra_settings=sd.AsioSettings(channel_selectors=chs))
         else:
-            if ch + 1 > info["max_output_channels"]:
-                raise RuntimeError(f"That output only has {info['max_output_channels']} channel(s).")
-            self.stream = sd.OutputStream(device=device, channels=info["max_output_channels"], samplerate=fs,
-                                          dtype="float32", callback=cb)
+            self.stream = sd.OutputStream(device=device, channels=nout, samplerate=fs, dtype="float32", callback=cb)
         self.stream.start()
         return fs
 
@@ -588,7 +593,7 @@ class NoisePlayer:
 
 class SimSource:
     """Test input paced by the wall clock: pink noise with a slow swell, a 94 dB calibrator tone,
-    or the theater noise generator routed through a fake room (per-channel speaker gains)."""
+    or the pink-noise generator routed through a fake room (per-channel speaker gains)."""
     B = [0.049922035, -0.095993537, 0.050612699, -0.004408786]
     A = [1, -2.494956002, 2.017265875, -0.522189400]
     ROOM = [0.0, -1.2, 0.8, 4.0, -2.5, -1.8, 1.5, -3.0, 0.4, -0.9, 1.1, -1.6]   # dB per output channel
@@ -599,7 +604,7 @@ class SimSource:
         self.t0 = time.monotonic()
         self.done = 0
         self.zi = np.zeros(3)
-        self.inject = None           # NoisePlayer when the theater generator is simulated
+        self.inject = None           # NoisePlayer when the pink-noise generator plays to "Simulated"
 
     def read(self):
         target = int((time.monotonic() - self.t0) * self.fs)
@@ -698,7 +703,7 @@ WEIGHT_TXT = {
     "A": "<b>A-weighting</b> hears the way your ears do at normal listening levels: it turns down the deep "
          "lows and the very top. It's the standard for loudness and hearing safety (OSHA, WHO, venue limits).",
     "C": "<b>C-weighting</b> is almost flat and keeps the low end. Use it to see bass and subwoofer energy, "
-         "and for peaks and theater calibration (85 dBC).",
+         "and for peaks and speaker level calibration (85 dBC).",
     "Z": "<b>Z-weighting</b> is zero weighting, completely flat from 10 Hz to 20 kHz, with no ear correction.",
 }
 TIME_TXT = {
@@ -748,10 +753,6 @@ GLOSSARY = {
     "dBFS": "<b>dBFS</b> is decibels relative to digital full scale. 0 dBFS is the loudest the converter can "
             "do. This uses the AES17 convention, where a full-scale sine reads 0 dBFS RMS. Cinema pink noise "
             "is -20 dBFS RMS.",
-    "Theater": "<b>Theater calibration</b> plays band-limited pink noise through one speaker at a time. "
-               "Turn that channel's amp or processor gain until it reads the target (C-weighted, Slow). The "
-               "film standard is 85 dBC per screen channel at -20 dBFS (82 dBC for surrounds in many rooms). "
-               "The LFE reads about 10 dB higher in-band.",
     "dBC Slow": "Measured C-weighted with Slow response, as the cinema calibration standard (SMPTE RP 200) calls for.",
     "Mic profile": "A <b>mic profile</b> stores a microphone's calibration offset and its frequency-response "
                    "file (for example a miniDSP UMIK .txt). That way readings are correct for that mic. Use "
@@ -872,6 +873,511 @@ def install_combo_fixer(app):
         app.installEventFilter(app._combo_fixer)
 
 
+# ---------- dialogs open inside the main window (not as separate windows)
+HOST = None       # the MainWindow that hosts in-window dialogs
+
+
+class DialogCover(QtWidgets.QWidget):
+    """Dims the main window and holds one dialog as a card in the middle of it."""
+    def __init__(self, host, dlg):
+        super().__init__(host)
+        self.host, self.dlg = host, dlg
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, False)
+        self.card = QtWidgets.QFrame(self)
+        self.card.setObjectName("dlgcard")
+        self.card.setStyleSheet(f"QFrame#dlgcard {{ background:{T['bg']}; border:1px solid {T['btn_border']}; "
+                                "border-radius:10px; }")
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(40); shadow.setOffset(0, 8); shadow.setColor(QtGui.QColor(0, 0, 0, 160))
+        self.card.setGraphicsEffect(shadow)
+        v = QtWidgets.QVBoxLayout(self.card)
+        v.setContentsMargins(14, 10, 14, 14); v.setSpacing(8)
+        head = QtWidgets.QHBoxLayout()
+        self.title = QtWidgets.QLabel(dlg.windowTitle() or APP_NAME)
+        self.title.setStyleSheet("font-size:12pt; font-weight:700; background:transparent;")
+        x = QtWidgets.QToolButton(); x.setText("✕"); x.setAutoRaise(True); x.setToolTip("Close (Esc)")
+        x.setCursor(QtCore.Qt.PointingHandCursor)
+        x.clicked.connect(dlg.reject)
+        head.addWidget(self.title, 1); head.addWidget(x)
+        v.addLayout(head)
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        v.addWidget(self.scroll, 1)
+        self.want = None
+        host.installEventFilter(self)
+
+    def place(self):
+        r = self.host.rect()
+        self.setGeometry(r)
+        if self.want is None:
+            d = self.dlg
+            w = max(d.sizeHint().width(), d.minimumWidth(), d.width() if d.testAttribute(QtCore.Qt.WA_Resized) else 0)
+            h = max(d.sizeHint().height(), d.minimumHeight(),
+                    d.height() if d.testAttribute(QtCore.Qt.WA_Resized) else 0)
+            self.want = QtCore.QSize(w + 56, h + 76)   # card margins + title row + scrollbar room
+        w = min(self.want.width(), r.width() - 24)
+        h = min(self.want.height(), r.height() - 24)
+        self.card.setGeometry((r.width() - w) // 2, max(12, (r.height() - h) // 2), w, h)
+
+    def eventFilter(self, obj, ev):
+        if obj is self.host and ev.type() == QtCore.QEvent.Resize:
+            self.place()
+        return False
+
+    def paintEvent(self, ev):
+        p = QtGui.QPainter(self)
+        p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 120))
+
+    def mousePressEvent(self, ev):       # clicks on the dimmed area do nothing (the dialog stays modal)
+        ev.accept()
+
+
+def exec_in_window(dlg):
+    """Run a dialog as a card inside the main window instead of a separate window.
+    Falls back to a normal window when the main window isn't showing (e.g. in Mini mode)."""
+    host = HOST
+    if host is None or not host.isVisible() or host.isMinimized() or dlg is host:
+        return dlg.exec()
+    parent, flags = dlg.parentWidget(), dlg.windowFlags()
+    cover = DialogCover(host, dlg)
+    dlg.setWindowFlags(QtCore.Qt.Widget)
+    cover.scroll.setWidget(dlg)
+    cover.place()
+    cover.show(); cover.raise_()
+    host._covers = getattr(host, "_covers", 0) + 1
+    try:
+        host.menuBar().setEnabled(False)
+    except Exception:
+        pass
+    dlg.setFocus()
+    try:
+        return dlg.exec()
+    finally:
+        host._covers -= 1
+        if host._covers <= 0:
+            try:
+                host.menuBar().setEnabled(True)
+            except Exception:
+                pass
+        host.removeEventFilter(cover)
+        cover.hide()
+        try:
+            cover.scroll.takeWidget()
+            dlg.setParent(parent, flags)       # keep the dialog object usable for the caller
+        except RuntimeError:
+            pass
+        cover.deleteLater()
+
+
+_MSG_ICONS = {"info": QtWidgets.QMessageBox.Information, "warn": QtWidgets.QMessageBox.Warning,
+              "error": QtWidgets.QMessageBox.Critical, "ask": QtWidgets.QMessageBox.Question}
+
+
+def message(parent, kind, title, text, buttons=QtWidgets.QMessageBox.Ok, default=None):
+    """In-window replacement for QMessageBox.information/warning/critical/question."""
+    box = QtWidgets.QMessageBox(parent)
+    box.setIcon(_MSG_ICONS[kind])
+    box.setWindowTitle(title or APP_NAME)
+    box.setText(text)
+    box.setStandardButtons(buttons)
+    if default is not None:
+        box.setDefaultButton(default)
+    r = exec_in_window(box)
+    clicked = box.standardButton(box.clickedButton()) if box.clickedButton() else QtWidgets.QMessageBox.NoButton
+    box.deleteLater()
+    return clicked if clicked != QtWidgets.QMessageBox.NoButton else r
+
+
+def ask_box(parent, title, text, buttons=QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, default=None):
+    """In-window replacement for QMessageBox.question."""
+    return message(parent, "ask", title, text, buttons, default)
+
+
+def ask_yes(parent, title, text, default_yes=True):
+    yes, no = QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No
+    return message(parent, "ask", title, text, yes | no, yes if default_yes else no) == yes
+
+
+def get_text(parent, title, label, text=""):
+    """In-window replacement for QInputDialog.getText."""
+    d = QtWidgets.QInputDialog(parent)
+    d.setWindowTitle(title); d.setLabelText(label); d.setTextValue(text)
+    ok = exec_in_window(d) == QtWidgets.QDialog.Accepted
+    val = d.textValue()
+    d.deleteLater()
+    return val, ok
+
+
+# ---------- "Logging complete" celebration when a scheduled logging window ends
+class LoggingComplete(QtWidgets.QWidget):
+    """Full-window animation: a ring sweeps around, a check mark draws itself, sparks burst out,
+    then the summary fades in. Click anywhere (or wait) to dismiss."""
+    DUR = 1600          # ms for the draw-in
+    HOLD = 12000        # ms before it fades away by itself
+
+    def __init__(self, host, lines):
+        super().__init__(host)
+        self.host, self.lines = host, lines
+        self.t = 0.0
+        self.alpha = 1.0
+        rng = np.random.default_rng()
+        self.sparks = [(rng.uniform(0, 2 * math.pi), rng.uniform(0.6, 1.0), rng.uniform(3, 6)) for _ in range(28)]
+        self.setGeometry(host.rect())
+        host.installEventFilter(self)
+        self.anim = QtCore.QVariantAnimation(self, startValue=0.0, endValue=1.0, duration=self.DUR)
+        self.anim.setEasingCurve(QtCore.QEasingCurve.Linear)
+        self.anim.valueChanged.connect(self._step)
+        self.fade = QtCore.QVariantAnimation(self, startValue=1.0, endValue=0.0, duration=600)
+        self.fade.valueChanged.connect(self._fade)
+        self.fade.finished.connect(self.close_it)
+        QtCore.QTimer.singleShot(self.HOLD, self.dismiss)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.show(); self.raise_()
+        self.anim.start()
+
+    def _step(self, v):
+        self.t = float(v); self.update()
+
+    def _fade(self, v):
+        self.alpha = float(v); self.update()
+
+    def dismiss(self):
+        if self.fade.state() != QtCore.QAbstractAnimation.Running and self.alpha > 0:
+            self.fade.start()
+
+    def close_it(self):
+        self.host.removeEventFilter(self)
+        self.hide(); self.deleteLater()
+
+    def mousePressEvent(self, ev):
+        self.dismiss()
+
+    def eventFilter(self, obj, ev):
+        if obj is self.host and ev.type() == QtCore.QEvent.Resize:
+            self.setGeometry(self.host.rect())
+        return False
+
+    def paintEvent(self, ev):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.setOpacity(self.alpha)
+        ease = lambda x: 1 - (1 - min(max(x, 0.0), 1.0)) ** 3
+        p.fillRect(self.rect(), QtGui.QColor(0, 0, 0, int(150 * ease(self.t / 0.25))))
+        cx, cy = self.width() / 2, self.height() * 0.40
+        R = max(40.0, min(self.width(), self.height()) * 0.14)
+        green = QtGui.QColor(T["green"])
+        # 1. ring sweeps around (0 - 45 %)
+        ring = ease(self.t / 0.45)
+        pen = QtGui.QPen(green, R * 0.12, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap)
+        p.setPen(pen); p.setBrush(QtCore.Qt.NoBrush)
+        rect = QtCore.QRectF(cx - R, cy - R, 2 * R, 2 * R)
+        p.drawArc(rect, 90 * 16, int(-360 * 16 * ring))
+        # 2. disc fills and check mark draws (40 - 75 %)
+        fill = ease((self.t - 0.40) / 0.2)
+        if fill > 0:
+            c = QtGui.QColor(green); c.setAlpha(int(70 * fill))
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(c)
+            p.drawEllipse(QtCore.QPointF(cx, cy), R * 0.94, R * 0.94)
+        chk = ease((self.t - 0.45) / 0.30)
+        if chk > 0:
+            a, b, c2 = (QtCore.QPointF(cx - R * 0.45, cy + R * 0.02), QtCore.QPointF(cx - R * 0.12, cy + R * 0.35),
+                        QtCore.QPointF(cx + R * 0.50, cy - R * 0.32))
+            l1 = math.hypot(b.x() - a.x(), b.y() - a.y()); l2 = math.hypot(c2.x() - b.x(), c2.y() - b.y())
+            d = chk * (l1 + l2)
+            path = QtGui.QPainterPath(a)
+            if d <= l1:
+                path.lineTo(a + (b - a) * (d / l1))
+            else:
+                path.lineTo(b); path.lineTo(b + (c2 - b) * ((d - l1) / l2))
+            p.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), R * 0.16, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap,
+                                QtCore.Qt.RoundJoin))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawPath(path)
+        # 3. sparks burst outwards (60 - 100 %)
+        burst = (self.t - 0.6) / 0.4
+        if 0 < burst <= 1:
+            p.setPen(QtCore.Qt.NoPen)
+            for ang, spd, size in self.sparks:
+                dist = R * (1.1 + 1.3 * spd * ease(burst))
+                c = QtGui.QColor(T["yellow"] if size > 4.5 else T["green"]); c.setAlpha(int(255 * (1 - burst)))
+                p.setBrush(c)
+                p.drawEllipse(QtCore.QPointF(cx + math.cos(ang) * dist, cy + math.sin(ang) * dist), size, size)
+        # 4. text slides up and fades in (55 - 100 %)
+        tx = ease((self.t - 0.55) / 0.45)
+        if tx > 0:
+            p.setOpacity(self.alpha * tx)
+            f = QtGui.QFont(self.font()); f.setPointSizeF(max(18.0, R * 0.30)); f.setBold(True)
+            p.setFont(f); p.setPen(QtGui.QColor("#ffffff"))
+            y0 = cy + R * 1.35 + (1 - tx) * 20
+            fh = QtGui.QFontMetricsF(f).height()
+            p.drawText(QtCore.QRectF(0, y0, self.width(), fh * 1.2), QtCore.Qt.AlignHCenter, "Logging Complete")
+            f2 = QtGui.QFont(self.font()); f2.setPointSizeF(max(11.0, R * 0.12))
+            p.setFont(f2); p.setPen(QtGui.QColor("#d8dde3"))
+            y = y0 + fh * 1.3
+            lh = QtGui.QFontMetricsF(f2).height() * 1.25
+            for line in self.lines + ["Click anywhere to close"]:
+                if line == "Click anywhere to close":
+                    p.setPen(QtGui.QColor("#9aa1ab"))
+                p.drawText(QtCore.QRectF(20, y, self.width() - 40, lh), QtCore.Qt.AlignHCenter, line)
+                y += lh
+
+
+# ---------- toolbar rows whose buttons can be dragged into a new order
+class ReorderBar(QtWidgets.QWidget):
+    """A row of widgets (buttons, dividers...) that can be dragged into a new order while unlocked.
+    The order is saved as a list of keys."""
+    MIME = "application/x-servicespl-bar"
+    changed = QtCore.Signal(list)
+
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+        self.setObjectName("reorderbar")
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.lay = QtWidgets.QHBoxLayout(self)
+        self.lay.setContentsMargins(2, 2, 2, 2); self.lay.setSpacing(4)
+        self.items = {}          # key -> widget
+        self.locked = True
+        self._press = None
+        self._marker = QtWidgets.QFrame(self)
+        self._marker.setFixedWidth(3); self._marker.hide()
+        self.setAcceptDrops(True)
+
+    def add(self, key, w):
+        w.setProperty("bar_key", key)
+        self.items[key] = w
+        self.lay.addWidget(w)
+        w.installEventFilter(self)
+        for c in w.findChildren(QtWidgets.QWidget):
+            c.installEventFilter(self)
+        return w
+
+    def divider(self, key):
+        f = QtWidgets.QFrame(); f.setFrameShape(QtWidgets.QFrame.VLine)
+        f.setFixedWidth(14); f.setObjectName("bardiv")
+        f.setStyleSheet(f"QFrame#bardiv {{ color:{T['btn_border']}; border:none; "
+                        f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
+                        f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
+                        "margin:3px 0; }")
+        f.setToolTip("Divider")
+        return self.add(key, f)
+
+    def order(self):
+        out = []
+        for i in range(self.lay.count()):
+            w = self.lay.itemAt(i).widget()
+            if w is not None and w.property("bar_key"):
+                out.append(w.property("bar_key"))
+        return out
+
+    def apply_order(self, keys):
+        if not keys:
+            return
+        seen = [k for k in keys if k in self.items]
+        rest = [k for k in self.order() if k not in seen]
+        for k in seen + rest:
+            w = self.items[k]
+            self.lay.removeWidget(w)
+            self.lay.addWidget(w)
+
+    def set_locked(self, locked):
+        self.locked = locked
+        for w in self.items.values():
+            w.setCursor(QtCore.Qt.ArrowCursor if locked else QtCore.Qt.OpenHandCursor)
+            for c in w.findChildren(QtWidgets.QWidget):
+                c.setCursor(QtCore.Qt.ArrowCursor if locked else QtCore.Qt.OpenHandCursor)
+        self.setStyleSheet("QWidget#reorderbar { border:1px solid transparent; }" if locked else
+                           f"QWidget#reorderbar {{ border:1px dashed {T['accent']}; border-radius:6px; }}")
+        self.update()
+
+    def _top_item(self, obj):
+        while obj is not None and obj is not self:
+            if obj.property("bar_key") and obj.parent() is self:
+                return obj
+            obj = obj.parent()
+        return None
+
+    def eventFilter(self, obj, ev):
+        if self.locked:
+            return False
+        t = ev.type()
+        if t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick) \
+                and ev.button() == QtCore.Qt.LeftButton:
+            self._press = (self._top_item(obj), ev.globalPosition().toPoint())
+            return True
+        if t == QtCore.QEvent.MouseMove and self._press and self._press[0] is not None:
+            w, p0 = self._press
+            if (ev.globalPosition().toPoint() - p0).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                self._press = None
+                self._drag(w)
+            return True
+        if t == QtCore.QEvent.MouseButtonRelease:
+            self._press = None
+            return True
+        if t in (QtCore.QEvent.Wheel, QtCore.QEvent.KeyPress):
+            return True
+        return False
+
+    def _drag(self, w):
+        drag = QtGui.QDrag(w)
+        md = QtCore.QMimeData()
+        md.setData(self.MIME, w.property("bar_key").encode())
+        drag.setMimeData(md)
+        drag.setPixmap(w.grab())
+        drag.setHotSpot(QtCore.QPoint(w.width() // 2, w.height() // 2))
+        drag.exec(QtCore.Qt.MoveAction)
+        self._marker.hide()
+
+    def _drop_index(self, x):
+        keys = self.order()
+        for i, k in enumerate(keys):
+            g = self.items[k].geometry()
+            if x < g.center().x():
+                return i
+        return len(keys)
+
+    def dragEnterEvent(self, ev):
+        if ev.mimeData().hasFormat(self.MIME) and bytes(ev.mimeData().data(self.MIME)).decode() in self.items:
+            ev.acceptProposedAction()
+
+    def dragMoveEvent(self, ev):
+        if not ev.mimeData().hasFormat(self.MIME):
+            return
+        ev.acceptProposedAction()
+        keys = self.order()
+        i = self._drop_index(ev.position().x())
+        x = self.items[keys[i]].geometry().left() - 3 if i < len(keys) else self.items[keys[-1]].geometry().right() + 1
+        self._marker.setStyleSheet(f"background:{T['accent']};")
+        self._marker.setGeometry(max(0, x), 0, 3, self.height())
+        self._marker.show(); self._marker.raise_()
+
+    def dragLeaveEvent(self, ev):
+        self._marker.hide()
+
+    def dropEvent(self, ev):
+        self._marker.hide()
+        key = bytes(ev.mimeData().data(self.MIME)).decode()
+        if key not in self.items:
+            return
+        keys = self.order()
+        i = self._drop_index(ev.position().x())
+        old = keys.index(key)
+        keys.remove(key)
+        keys.insert(i - 1 if i > old else i, key)
+        self.apply_order(keys)
+        ev.acceptProposedAction()
+        self.changed.emit(keys)
+
+
+# ---------- pink noise out of your speakers (calibration + room EQ)
+SPEAKER_CHANNELS = ["Left + Right", "Left only", "Right only"] + [f"Output {i}" for i in range(1, 33)]
+
+
+class NoiseControls(QtWidgets.QWidget):
+    """Output picker + Play/Stop for pink noise. One shared player in the main window, so only one plays."""
+    def __init__(self, main, noise="Full-band pink (20 Hz - 20 kHz)", compact=False):
+        super().__init__()
+        self.main = main
+        self.player = main.noise_player
+        g = QtWidgets.QGridLayout(self)
+        g.setContentsMargins(0, 0, 0, 0)
+        self.out = QtWidgets.QComboBox()
+        self.out.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.out.setMinimumContentsLength(18)
+        self.chan = QtWidgets.QComboBox(); self.chan.addItems(SPEAKER_CHANNELS)
+        self.noise = QtWidgets.QComboBox(); self.noise.addItems(list(NOISE_TYPES))
+        self.noise.setCurrentText(noise)
+        self.level = QtWidgets.QDoubleSpinBox(); self.level.setRange(-60, -6); self.level.setDecimals(0)
+        self.level.setSuffix(" dBFS"); self.level.setSingleStep(1)
+        nc = main.cfg.get("noise", {})
+        self.level.setValue(nc.get("level", -20.0))
+        self.populate()
+        i = self.chan.findText(nc.get("channels", "Left + Right"))
+        self.chan.setCurrentIndex(max(i, 0))
+        self.play = QtWidgets.QPushButton("▶  Play pink noise"); self.play.setCheckable(True)
+        self.play.clicked.connect(self.toggle)
+        g.addWidget(QtWidgets.QLabel("Speakers out of"), 0, 0); g.addWidget(self.out, 0, 1, 1, 3)
+        g.addWidget(QtWidgets.QLabel("Channels"), 1, 0); g.addWidget(self.chan, 1, 1)
+        g.addWidget(QtWidgets.QLabel("Level"), 1, 2); g.addWidget(with_tip(self.level, "dBFS"), 1, 3)
+        g.addWidget(QtWidgets.QLabel("Noise"), 2, 0); g.addWidget(self.noise, 2, 1)
+        g.addWidget(self.play, 2, 2, 1, 2)
+        g.setColumnStretch(1, 1); g.setColumnStretch(3, 1)
+        for w in (self.out, self.chan, self.noise):
+            w.currentIndexChanged.connect(self.changed)
+        self.level.valueChanged.connect(self.changed)
+
+    def populate(self):
+        self.out.clear()
+        if sd is not None:
+            try:
+                apis = sd.query_hostapis()
+                default_out = sd.default.device[1] if sd.default.device else -1
+                for i, d in enumerate(sd.query_devices()):
+                    if d["max_output_channels"] > 0:
+                        tag = "  (system output)" if i == default_out else ""
+                        self.out.addItem(f"{d['name']}  [{apis[d['hostapi']]['name']}]{tag}", i)
+            except Exception:
+                pass
+        self.out.addItem(SIM_OUT, None)
+        want = self.main.cfg.get("noise", {}).get("out_device") or ""
+        i = self.out.findText(want)
+        if i < 0 and sd is not None:
+            try:                       # default: the computer's current sound output
+                i = self.out.findData(sd.default.device[1])
+            except Exception:
+                i = -1
+        self.out.setCurrentIndex(i if i >= 0 else 0)
+
+    def channels(self):
+        c = self.chan.currentText()
+        if c == "Left + Right":
+            return [0, 1]
+        if c == "Left only":
+            return [0]
+        if c == "Right only":
+            return [1]
+        return [int(c.split()[-1]) - 1]
+
+    def changed(self, *_):
+        self.main.cfg["noise"] = dict(out_device=self.out.currentText(), channels=self.chan.currentText(),
+                                      level=self.level.value())
+        if self.play.isChecked():
+            self.start()
+
+    def toggle(self, on):
+        if on:
+            if not self.main.running():
+                self.main.run_btn.click()
+            self.start()
+        else:
+            self.stop()
+
+    def start(self):
+        lo, hi = NOISE_TYPES[self.noise.currentText()]
+        try:
+            fs = self.player.open(self.out.currentData(), self.channels())
+        except Exception as ex:
+            self.play.setChecked(False)
+            self.play.setText("▶  Play pink noise")
+            message(self, "error", APP_NAME, f"Could not open the output:\n{ex}")
+            return
+        self.player.set_buffer(make_pink(fs, lo, min(hi, fs * 0.45), self.level.value(), seed=7))
+        if self.main.sim is not None:
+            self.main.sim.inject = self.player if self.out.currentData() is None else None
+        self.player.owner = self
+        self.play.setChecked(True)
+        self.play.setText("■  Stop noise")
+
+    def stop(self):
+        if getattr(self.player, "owner", None) in (self, None):
+            self.player.stop()
+            if self.main.sim is not None and self.main.sim.inject is self.player:
+                self.main.sim.inject = None
+        self.play.setChecked(False)
+        self.play.setText("▶  Play pink noise")
+
+
 class Tile(QtWidgets.QFrame):
     def __init__(self, title, size=22, tip=""):
         super().__init__()
@@ -904,7 +1410,10 @@ class Tile(QtWidgets.QFrame):
         self.info.set_text(explain(title) or self.tip)
 
     def refresh_theme(self):
-        self.t.setStyleSheet(f"color:{T['dim']}; font-size:9pt; background:transparent;")
+        if getattr(self, "big_title", False):      # main meter: make the weighting impossible to miss
+            self.t.setStyleSheet(f"color:{T['fg']}; font-size:12pt; font-weight:700; background:transparent;")
+        else:
+            self.t.setStyleSheet(f"color:{T['dim']}; font-size:9pt; background:transparent;")
         self.s.setStyleSheet(f"color:{T['dim']}; font-size:8pt; background:transparent;")
         self._paint_value()
 
@@ -1382,6 +1891,8 @@ class MeterPanel(QtWidgets.QWidget):
         self.banner.clicked.connect(lambda: self.banner.setVisible(False))
         v.addWidget(self.banner)
         self.main_tile = Tile("LAS", size=96)
+        self.main_tile.big_title = True
+        self.main_tile.refresh_theme()
         self.thumb = Thumb(130)
         ml = self.main_tile.layout()
         ml.removeWidget(self.main_tile.v)
@@ -1647,297 +2158,6 @@ class DosePanel(QtWidgets.QWidget):
             status.setStyleSheet(f"color:{sc}; font-weight:700; background:transparent;")
 
 
-THEATER_LAYOUTS = {
-    "2.0": ["L", "R"],
-    "5.1": ["L", "R", "C", "LFE", "Ls", "Rs"],
-    "7.1": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs"],
-    "7.1.4": ["L", "R", "C", "LFE", "Lss", "Rss", "Lrs", "Rrs", "Ltf", "Rtf", "Ltr", "Rtr"],
-}
-THEATER_PRESETS = {   # target dBC per channel kind, noise level dBFS
-    "Cinema / dub stage": dict(screen=85, surround=82, lfe=91, height=82, level=-20),
-    "Mid-size mix room": dict(screen=82, surround=79, lfe=88, height=79, level=-20),
-    "Small room / nearfield": dict(screen=79, surround=76, lfe=85, height=76, level=-20),
-    "Home theater (75 dBC)": dict(screen=75, surround=75, lfe=85, height=75, level=-30),
-}
-
-
-def chan_kind(name):
-    if name in ("L", "R", "C"):
-        return "screen"
-    if name == "LFE":
-        return "lfe"
-    if name.endswith(("tf", "tr")):
-        return "height"
-    return "surround"
-
-
-class TheaterPanel(QtWidgets.QWidget):
-    """Per-channel pink-noise level calibration (C-weighted, Slow)."""
-    TOL = 0.5
-
-    def __init__(self, main):
-        super().__init__()
-        self.main = main
-        self.tc = main.cfg["theater"]
-        self.player = NoisePlayer()
-        self.cur = -1
-        self.auto = None          # (channel index, t_start) while auto-sequencing
-        self.results = {}
-        v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(6, 6, 6, 6)
-        f = QtWidgets.QGridLayout()
-        self.out = QtWidgets.QComboBox()
-        self.layout_cb = QtWidgets.QComboBox(); self.layout_cb.addItems(list(THEATER_LAYOUTS))
-        self.preset = QtWidgets.QComboBox(); self.preset.addItems(list(THEATER_PRESETS))
-        self.noise = QtWidgets.QComboBox(); self.noise.addItems(list(NOISE_TYPES))
-        self.level = QtWidgets.QDoubleSpinBox(); self.level.setRange(-40, -6); self.level.setSuffix(" dBFS RMS")
-        self.level.setToolTip("AES17 level: a full-scale sine reads 0 dBFS. Cinema standard is -20 dBFS.")
-        f.addWidget(QtWidgets.QLabel("Output"), 0, 0); f.addWidget(self.out, 0, 1, 1, 3)
-        f.addWidget(QtWidgets.QLabel("Format"), 1, 0); f.addWidget(self.layout_cb, 1, 1)
-        f.addWidget(QtWidgets.QLabel("Room"), 1, 2); f.addWidget(with_tip(self.preset, "Theater"), 1, 3)
-        f.addWidget(QtWidgets.QLabel("Noise"), 2, 0); f.addWidget(self.noise, 2, 1)
-        f.addWidget(QtWidgets.QLabel("Level"), 2, 2); f.addWidget(with_tip(self.level, "dBFS"), 2, 3)
-        v.addLayout(f)
-        self.big = QtWidgets.QLabel("--.- dBC")
-        self.big.setAlignment(QtCore.Qt.AlignCenter)
-        self.hint = QtWidgets.QLabel("Pick a channel and press Play")
-        self.hint.setAlignment(QtCore.Qt.AlignCenter)
-        v.addWidget(self.big); v.addWidget(self.hint)
-        self.table = QtWidgets.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Ch", "Out", "Target", "Measured", "Adjust", ""])
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.table.itemChanged.connect(self._item_changed)
-        v.addWidget(self.table, 1)
-        b = QtWidgets.QHBoxLayout()
-        self.play = QtWidgets.QPushButton("▶ Play"); self.play.setCheckable(True)
-        self.play.clicked.connect(self.toggle_play)
-        prev = QtWidgets.QPushButton("◀ Prev"); prev.clicked.connect(lambda: self.step(-1))
-        nxt = QtWidgets.QPushButton("Next ▶"); nxt.clicked.connect(lambda: self.step(1))
-        cap = QtWidgets.QPushButton("Capture"); cap.setToolTip("Store the last 3 s LCeq for this channel")
-        cap.clicked.connect(self.capture)
-        self.auto_btn = QtWidgets.QPushButton("Auto run"); self.auto_btn.setCheckable(True)
-        self.auto_btn.setToolTip("Play each channel, wait 4 s to settle, capture 3 s, move on")
-        self.auto_btn.clicked.connect(self.toggle_auto)
-        for w in (self.play, prev, nxt, cap, self.auto_btn):
-            b.addWidget(w)
-        v.addLayout(b)
-        self.populate_outputs()
-        self.layout_cb.setCurrentText(self.tc["layout"])
-        self.preset.setCurrentText(self.tc["preset"])
-        self.noise.setCurrentText(self.tc["noise"])
-        self.level.setValue(self.tc["level"])
-        self.layout_cb.currentTextChanged.connect(self.build_table)
-        self.preset.currentTextChanged.connect(self.apply_preset)
-        self.noise.currentTextChanged.connect(self._regen)
-        self.level.valueChanged.connect(self._regen)
-        self.out.currentIndexChanged.connect(self._out_changed)
-        self.table.currentCellChanged.connect(lambda r, *_: self.select(r))
-        self.build_table()
-        self.refresh_theme()
-
-    def refresh_theme(self):
-        self.big.setStyleSheet(f"font-size:40pt; font-weight:700; {MONO}")
-        self.hint.setStyleSheet(f"color:{T['dim']}; font-size:12pt;")
-
-    def populate_outputs(self):
-        self.out.blockSignals(True)
-        self.out.clear()
-        if sd is not None:
-            try:
-                apis = sd.query_hostapis()
-                for i, d in enumerate(sd.query_devices()):
-                    if d["max_output_channels"] > 0:
-                        self.out.addItem(f"{d['name']}  [{apis[d['hostapi']]['name']}]", i)
-            except Exception:
-                pass
-        self.out.addItem(SIM_OUT, None)
-        i = self.out.findText(self.tc.get("out_device") or "")
-        self.out.setCurrentIndex(i if i >= 0 else 0)
-        self.out.blockSignals(False)
-
-    def channels(self):
-        return THEATER_LAYOUTS[self.layout_cb.currentText()]
-
-    def build_table(self):
-        self.tc["layout"] = self.layout_cb.currentText()
-        self.table.blockSignals(True)
-        names = self.channels()
-        self.table.setRowCount(len(names))
-        pr = THEATER_PRESETS[self.preset.currentText()]
-        for i, n in enumerate(names):
-            out = self.tc["outputs"].get(n, i + 1)
-            tgt = self.tc["targets"].get(n, pr[chan_kind(n)])
-            items = [n, str(out), f"{tgt:.1f}", "", "", ""]
-            for c, txt in enumerate(items):
-                it = QtWidgets.QTableWidgetItem(txt)
-                if c not in (1, 2):
-                    it.setFlags(it.flags() & ~QtCore.Qt.ItemIsEditable)
-                it.setTextAlignment(QtCore.Qt.AlignCenter)
-                self.table.setItem(i, c, it)
-            if n in self.results:
-                self._show_result(i, self.results[n])
-        self.table.blockSignals(False)
-
-    def apply_preset(self, name):
-        self.tc["preset"] = name
-        self.tc["targets"] = {}
-        pr = THEATER_PRESETS[name]
-        self.level.setValue(pr["level"])
-        self.build_table()
-
-    def _item_changed(self, it):
-        n = self.table.item(it.row(), 0).text()
-        try:
-            val = float(it.text())
-        except ValueError:
-            return
-        if it.column() == 1:
-            self.tc["outputs"][n] = max(1, int(val))
-            if it.row() == self.cur and self.player.playing:
-                self.start_noise()
-        elif it.column() == 2:
-            self.tc["targets"][n] = val
-        self.main.save_cfg()
-
-    def target(self, row):
-        try:
-            return float(self.table.item(row, 2).text())
-        except (ValueError, AttributeError):
-            return 85.0
-
-    def out_ch(self, row):
-        try:
-            return max(1, int(float(self.table.item(row, 1).text()))) - 1
-        except (ValueError, AttributeError):
-            return row
-
-    def _out_changed(self):
-        self.tc["out_device"] = self.out.currentText()
-        if self.player.playing:
-            self.start_noise()
-
-    def _regen(self):
-        self.tc["noise"] = self.noise.currentText()
-        self.tc["level"] = self.level.value()
-        if self.player.playing:
-            self.start_noise()
-
-    def select(self, row):
-        if row < 0:
-            return
-        self.cur = row
-        self.table.selectRow(row)
-        if self.player.playing:
-            self.start_noise()
-
-    def step(self, d):
-        n = self.table.rowCount()
-        self.select((max(self.cur, 0) + d) % n)
-
-    def start_noise(self):
-        if self.cur < 0:
-            self.select(0)
-        ch = self.out_ch(self.cur)
-        name = self.channels()[self.cur]
-        lo, hi = NOISE_TYPES[self.noise.currentText()]
-        if name == "LFE" and hi > 200:
-            lo, hi = 20, 120          # always band-limit the LFE channel
-        try:
-            fs = self.player.open(self.out.currentData(), ch)
-        except Exception as ex:
-            self.play.setChecked(False)
-            QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not open the output:\n{ex}")
-            return
-        self.player.set_buffer(make_pink(fs, lo, min(hi, fs * 0.45), self.level.value()))
-        self.player.ch = ch
-        if self.main.sim is not None:
-            self.main.sim.inject = self.player if self.out.currentData() is None else None
-        self.play.setChecked(True)
-        self.play.setText("■ Stop")
-        self.t_start = time.time()
-
-    def stop_noise(self):
-        self.player.stop()
-        self.play.setChecked(False)
-        self.play.setText("▶ Play")
-
-    def toggle_play(self, on):
-        if on:
-            if not self.main.running():
-                self.main.run_btn.click()
-            self.start_noise()
-        else:
-            self.auto = None
-            self.auto_btn.setChecked(False)
-            self.stop_noise()
-
-    def toggle_auto(self, on):
-        if on:
-            if not self.main.running():
-                self.main.run_btn.click()
-            self.select(0)
-            self.start_noise()
-            self.auto = time.time()
-        else:
-            self.auto = None
-            self.stop_noise()
-
-    def capture(self):
-        e = self.main.engine
-        if e is None or self.cur < 0:
-            return
-        val = e.leq("C", 3)
-        name = self.channels()[self.cur]
-        self.results[name] = val
-        self._show_result(self.cur, val)
-        self.main.add_event(f"Theater cal {name}: {val:.1f} dBC (target {self.target(self.cur):.1f})")
-
-    def _show_result(self, row, val):
-        d = self.target(row) - val
-        ok = abs(d) <= self.TOL
-        self.table.blockSignals(True)
-        self.table.item(row, 3).setText(f"{val:.1f}")
-        self.table.item(row, 4).setText("OK" if ok else f"{'▲ up' if d > 0 else '▼ down'} {abs(d):.1f} dB")
-        self.table.item(row, 5).setText("✓" if ok else "✗")
-        col = QtGui.QColor(T["green"] if ok else T["yellow"] if abs(d) <= 2 else T["red"])
-        for c in (3, 4, 5):
-            self.table.item(row, c).setForeground(col)
-        self.table.blockSignals(False)
-
-    def tick(self, e):
-        if e is None or not self.player.playing or self.cur < 0:
-            if not self.player.playing and self.big.text() != "--.- dBC":
-                self.big.setText("--.- dBC")
-                self.refresh_theme()
-            return
-        lv = e.level("C", "S")
-        d = self.target(self.cur) - lv
-        col = T["green"] if abs(d) <= self.TOL else T["yellow"] if abs(d) <= 2 else T["red"]
-        self.big.setText(f"{fmt(lv).strip()} dBC")
-        self.big.setStyleSheet(f"font-size:40pt; font-weight:700; {MONO} color:{col};")
-        name = self.channels()[self.cur]
-        if abs(d) <= self.TOL:
-            msg = f"{name}: on target ✓"
-        else:
-            msg = f"{name}: turn {'UP' if d > 0 else 'DOWN'} {abs(d):.1f} dB"
-        if self.auto is not None:
-            el = time.time() - self.auto
-            msg += f"   ·   auto: {'settling' if el < 4 else 'capturing'} {el:.0f}/7 s"
-            if el >= 7:
-                self.capture()
-                if self.cur + 1 >= self.table.rowCount():
-                    self.auto_btn.setChecked(False)
-                    self.toggle_auto(False)
-                    self.hint.setText("Auto run finished. Adjust the red/yellow channels and re-run.")
-                    return
-                self.step(1)
-                self.auto = time.time()
-        self.hint.setText(msg)
-
-
 class SessionPanel(QtWidgets.QWidget):
     def __init__(self, main):
         super().__init__()
@@ -2066,7 +2286,7 @@ class CalWizard(QtWidgets.QDialog):
         super().__init__(main)
         self.main = main
         self.setWindowTitle("Calibration wizard")
-        self.setMinimumSize(560, 430)
+        self.setMinimumSize(600, 520)
         self.result = None        # dict(offset, info, method, points, ...)
         self.readings = collections.deque(maxlen=20)
         v = QtWidgets.QVBoxLayout(self)
@@ -2088,6 +2308,7 @@ class CalWizard(QtWidgets.QDialog):
         self._build_file_page()
         self._build_manual_page()
         self._build_done_page()
+        self._build_ref_page()
         self.history = [0]
         self.show_page(0)
         self.timer = QtCore.QTimer(self)
@@ -2129,14 +2350,20 @@ class CalWizard(QtWidgets.QDialog):
     def _build_method_page(self):
         lay = self._page("2 · How do you want to calibrate?")
         self.m_cal = QtWidgets.QRadioButton("Acoustic calibrator (most accurate)")
-        self.m_file = QtWidgets.QRadioButton("Load the mic's calibration file (UMIK-1 / UMIK-2 / REW .txt)")
+        self.m_file = QtWidgets.QRadioButton("Load the mic's calibration file (UMIK, Audix TM1, REW .txt / .cal / .frd)")
         self.m_man = QtWidgets.QRadioButton("Enter numbers by hand (mic sensitivity or known offset)")
+        self.m_ref = QtWidgets.QRadioButton("Pink noise from my speakers + a reference SPL meter")
         self.m_cal.setChecked(True)
         lay.addWidget(self.m_cal)
         lay.addWidget(self._note("Put a 94 or 114 dB calibrator on the mic. Takes 5 seconds."))
+        lay.addWidget(self.m_ref)
+        lay.addWidget(self._note("No calibrator? ServiceSPL plays pink noise out of your speakers. Hold a trusted "
+                                 "SPL meter next to the mic, pick the same weighting and speed as that meter, and "
+                                 "type in what it reads."))
         lay.addWidget(self.m_file)
-        lay.addWidget(self._note("Applies the frequency correction, and the Sens Factor for absolute level "
-                                 "when your input volume is at 100 %. You can fine-tune with a calibrator afterwards."))
+        lay.addWidget(self._note("Applies the frequency correction. USB mics (UMIK) also get their absolute level "
+                                 "from the Sens Factor. Analog mics like the TM1 then need a calibrator or reference "
+                                 "meter step to set the level: the wizard takes you there."))
         lay.addWidget(self.m_man)
         lay.addWidget(self._note("Mic mV/Pa plus interface gain, or type an offset you already know."))
         lay.addStretch()
@@ -2144,8 +2371,8 @@ class CalWizard(QtWidgets.QDialog):
     def _build_calibrator_page(self):
         lay = self._page("3 · Acoustic calibrator")
         f = QtWidgets.QFormLayout()
-        self.c_level = QtWidgets.QComboBox(); self.c_level.setEditable(True)
-        self.c_level.addItems(["94.0", "114.0", "104.0", "124.0"])
+        self.c_level = QtWidgets.QDoubleSpinBox(); self.c_level.setRange(60, 140); self.c_level.setDecimals(1)
+        self.c_level.setValue(94.0); self.c_level.setSuffix(" dB SPL")
         self.c_freq = QtWidgets.QComboBox(); self.c_freq.addItems(["1 kHz", "250 Hz"])
         f.addRow("Calibrator level (dB SPL)", self.c_level)
         f.addRow("Calibrator frequency", self.c_freq)
@@ -2232,9 +2459,69 @@ class CalWizard(QtWidgets.QDialog):
         self.d_live.setAlignment(QtCore.Qt.AlignCenter)
         self.d_live.setStyleSheet(f"font-size:30pt; font-weight:700; {MONO}")
         lay.addWidget(self.d_live)
-        lay.addWidget(self._note("This is the live reading (Z, Fast) with the new calibration. "
-                                 "With the calibrator still on, it should match its level."))
+        self.d_others = QtWidgets.QLabel("")
+        self.d_others.setAlignment(QtCore.Qt.AlignCenter)
+        self.d_others.setStyleSheet(f"{MONO} font-size:11pt;")
+        lay.addWidget(self.d_others)
+        self.d_note = self._note("")
+        lay.addWidget(self.d_note)
+        self.d_warn = QtWidgets.QLabel("")
+        self.d_warn.setWordWrap(True)
+        self.d_warn.setStyleSheet(f"color:{T['yellow']}; font-weight:600;")
+        lay.addWidget(self.d_warn)
         lay.addStretch()
+
+    def _build_ref_page(self):
+        lay = self._page("3 · Pink noise + reference SPL meter")
+        steps_box = QtWidgets.QScrollArea(); steps_box.setWidgetResizable(True)
+        steps_box.setFrameShape(QtWidgets.QFrame.NoFrame); steps_box.setMinimumHeight(150)
+        lay.addWidget(steps_box, 1)
+        steps_box.setWidget(self._note(
+            "Calibrate with pink noise from the room speakers\n"
+            "1. Set the TM1's preamp gain and phantom power where you'll leave them for the service. If you change "
+            "the gain later, calibrate again.\n"
+            "2. Put the TM1 on a stand at the main listening position, pointing at the ceiling. Hold or mount your "
+            "handheld meter right next to it, at the same height and pointing the same way.\n"
+            "3. Play pink noise through the main speakers with the Play pink noise button below (pick the output that "
+            "feeds your console or speakers), or use your console's generator. Start with the speakers turned down, "
+            "then play it at about -20 dBFS.\n"
+            "4. Bring the speakers up until the handheld reads about 85 dB. Keep the room quiet: no HVAC blasts, "
+            "talking or walking around.\n"
+            "5. Set the handheld and this page to the same weighting and speed. Z (flat) and Slow is the easiest "
+            "match, or C on both if the handheld has no Z.\n"
+            "6. Press Start meter if it isn't running, and wait until both readings settle.\n"
+            "7. Type in what the handheld reads, then press Measure (10 s). Don't move anything while it measures.\n"
+            "8. Press Next. The reading in the same weighting should match the handheld. Then Save."))
+        nb = QtWidgets.QGroupBox("Pink noise from your speakers")
+        nbl = QtWidgets.QVBoxLayout(nb)
+        self.r_noise = NoiseControls(self.main)
+        nbl.addWidget(self.r_noise)
+        lay.addWidget(nb)
+        f = QtWidgets.QFormLayout()
+        self.r_w = QtWidgets.QComboBox(); self.r_w.addItems(["Z", "C", "A"])
+        self.r_t = QtWidgets.QComboBox(); self.r_t.addItems(["Slow", "Fast"])
+        self.r_ref = QtWidgets.QDoubleSpinBox(); self.r_ref.setRange(30, 140); self.r_ref.setDecimals(1)
+        self.r_ref.setValue(85.0); self.r_ref.setSuffix(" dB")
+        f.addRow("Reference meter weighting", with_tip(self.r_w, "Weighting"))
+        f.addRow("Reference meter speed", with_tip(self.r_t, "Speed"))
+        f.addRow("Reference meter reads", self.r_ref)
+        lay.addLayout(f)
+        self.r_live = QtWidgets.QLabel("--.- dB")
+        self.r_live.setAlignment(QtCore.Qt.AlignCenter)
+        self.r_live.setStyleSheet(f"font-size:30pt; font-weight:700; {MONO}")
+        lay.addWidget(self.r_live)
+        row = QtWidgets.QHBoxLayout()
+        self.r_start = QtWidgets.QPushButton("Start meter"); self.r_start.clicked.connect(self.main.run_btn.click)
+        self.r_meas = QtWidgets.QPushButton("Measure (10 s)"); self.r_meas.clicked.connect(self.measure_ref)
+        self.r_prog = QtWidgets.QProgressBar(); self.r_prog.setRange(0, 100); self.r_prog.setValue(0)
+        row.addWidget(self.r_start); row.addWidget(self.r_meas); row.addWidget(self.r_prog, 1)
+        lay.addLayout(row)
+        self.r_res = QtWidgets.QLabel("")
+        self.r_res.setWordWrap(True)
+        lay.addWidget(self.r_res)
+        lay.addStretch()
+        self.ref_raw = None
+        self.ref_busy = False
 
     # navigation ----------------------------------------------------------
     def show_page(self, i):
@@ -2242,8 +2529,12 @@ class CalWizard(QtWidgets.QDialog):
         self.title.setText(self.stack.widget(i).property("title"))
         self.back.setEnabled(len(self.history) > 1)
         self.next.setText("Save ✓" if i == 5 else "Next ▶")
+        if i in (2, 6):              # measure through the curve this profile will use
+            self._use_curve(self.base_profile()[1].get("cal_points")
+                            if self.base_profile()[1].get("use_curve", True) else None)
         if i == 5:
             self.fill_summary()
+            self._use_curve(self.result.get("cal_points") if self.result else None)
 
     def go_back(self):
         if len(self.history) > 1:
@@ -2257,8 +2548,8 @@ class CalWizard(QtWidgets.QDialog):
                 self.p_name.setFocus(); return
             nxt = 1
         elif i == 1:
-            nxt = 2 if self.m_cal.isChecked() else 3 if self.m_file.isChecked() else 4
-        elif i in (2, 3, 4):
+            nxt = 2 if self.m_cal.isChecked() else 3 if self.m_file.isChecked() else 6 if self.m_ref.isChecked() else 4
+        elif i in (2, 3, 4, 6):
             if not self.make_result(i):
                 return
             nxt = 5
@@ -2274,6 +2565,25 @@ class CalWizard(QtWidgets.QDialog):
         prof = copy.deepcopy(self.main.cfg["profiles"].get(name) or DEFAULTS["profiles"]["Default"])
         return name, prof
 
+    def _use_curve(self, pts):
+        """Run the live engine through the frequency correction being set up, so the wizard reads what the
+        dashboard will read after Save."""
+        e = self.main.engine
+        if e is not None:
+            key = None if not pts else (len(pts), pts[0][0], pts[-1][0], round(sum(p[1] for p in pts), 4))
+            if getattr(e, "_wiz_curve", "unset") != key:
+                e.calfilt = CalFilter(pts, e.fs) if pts else None
+                e._wiz_curve = key
+
+    def measure_ref(self):
+        e = self.main.engine
+        if e is None:
+            return
+        e.begin_cal(10.0, self.r_w.currentText())
+        self.ref_busy = True
+        self.r_meas.setEnabled(False)
+        self.r_res.setText("Measuring… keep the noise steady and don't move the meters")
+
     def measure(self):
         e = self.main.engine
         if e is None:
@@ -2287,6 +2597,7 @@ class CalWizard(QtWidgets.QDialog):
         running = e is not None and self.main.running()
         self.c_start.setVisible(not running)
         self.c_meas.setEnabled(running and not (e and e.cal_target))
+        self.r_meas.setEnabled(running and not (e and e.cal_target))
         if not running:
             self.c_live.setText("--.- dB")
             self.c_stab.setText("Meter is stopped: press Start meter")
@@ -2299,10 +2610,10 @@ class CalWizard(QtWidgets.QDialog):
         self.c_stab.setStyleSheet(f"color:{T['green'] if spread < 0.3 else T['yellow']}; font-weight:600;")
         if e.cal_target:
             self.c_prog.setValue(int(e.cal_progress * 100))
-        if e.cal_done:
+        if e.cal_done and not self.ref_busy:
             raw = e.finish_cal()
             try:
-                ref = float(self.c_level.currentText())
+                ref = float(self.c_level.value())
             except ValueError:
                 ref = 94.0
             self.cal_raw = (raw, ref)
@@ -2310,9 +2621,29 @@ class CalWizard(QtWidgets.QDialog):
             self.c_res.setText(f"Done. Offset {off:.2f} dB (was {e.offset:.2f}, change {off - e.offset:+.2f} dB). "
                                "Press Next.")
             self.c_prog.setValue(100)
-        if self.stack.currentIndex() == 5 and self.result:
-            raw_now = lz - e.offset
-            self.d_live.setText(f"{raw_now + self.result['offset']:.1f} dB")
+        page = self.stack.currentIndex()
+        if page == 6:
+            w, t = self.r_w.currentText(), "S" if self.r_t.currentText() == "Slow" else "F"
+            self.r_start.setVisible(not running)
+            self.r_live.setText(f"L{w}{t}  {fmt(e.level(w, t)).strip()} dB")
+            if self.ref_busy:
+                self.r_prog.setValue(int(e.cal_progress * 100))
+        if self.ref_busy and e.cal_done:
+            raw = e.finish_cal()
+            self.ref_busy = False
+            ref = self.r_ref.value()
+            self.ref_raw = (raw, ref, self.r_w.currentText(), self.r_t.currentText())
+            self.r_meas.setEnabled(True)
+            self.r_prog.setValue(100)
+            off = ref - raw
+            self.r_res.setText(f"Done. Offset {off:.2f} dB (was {e.offset:.2f}, change {off - e.offset:+.2f} dB). "
+                               "Press Next.")
+        if page == 5 and self.result:
+            d = self.result["offset"] - e.offset
+            mw, mt = self.main.cfg["main_weight"], self.main.cfg["main_time"]
+            self.d_live.setText(f"L{mw}{mt}  {fmt(e.level(mw, mt) + d).strip()} dB")
+            others = [(k, tt) for k, tt in (("A", "S"), ("C", "S"), ("Z", "F")) if (k, tt) != (mw, mt)]
+            self.d_others.setText("   ·   ".join(f"L{k}{tt} {fmt(e.level(k, tt) + d).strip()}" for k, tt in others))
 
     def choose_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Mic calibration file", os.path.expanduser("~"),
@@ -2397,9 +2728,19 @@ class CalWizard(QtWidgets.QDialog):
             self.result = dict(offset=off, method="cal file",
                                info=f"{d['name']} ({what}) · {now:%b %d %H:%M}",
                                cal_points=d["points"] if self.f_curve.isChecked() else None,
-                               cal_file=d["name"], sens_factor=d["sens_factor"], serial=d["serial"])
+                               cal_file=d["name"], sens_factor=d["sens_factor"], serial=d["serial"],
+                               level_set=what != "level unchanged" or bool(prof.get("calibrated")))
             if not self.f_sens.isChecked() and prof.get("calibrated"):
                 self.result["info"] = prof["cal_info"] + f" + {d['name']} curve"
+        elif page == 6:
+            if not self.ref_raw:
+                self.r_res.setText("Press Measure first.")
+                return False
+            raw, ref, w, t = self.ref_raw
+            self.result = dict(offset=ref - raw, method="reference meter",
+                               info=f"matched {ref:.1f} dB{w} {t} reference · {now:%b %d %H:%M}",
+                               cal_points=prof.get("cal_points"), cal_file=prof.get("cal_file", ""),
+                               sens_factor=prof.get("sens_factor"), serial=prof.get("serial", ""))
         else:
             off = self.manual_offset()
             self.result = dict(offset=off, method="manual",
@@ -2411,6 +2752,18 @@ class CalWizard(QtWidgets.QDialog):
     def fill_summary(self):
         name, prof = self.base_profile()
         r = self.result
+        mw, mt = self.main.cfg["main_weight"], self.main.cfg["main_time"]
+        how = {"calibrator": "With the calibrator still on, the Z reading should match its level.",
+               "reference meter": f"It should match your reference meter when set to the same weighting "
+                                  f"({self.ref_raw[2] if self.ref_raw else 'C'}) and speed.",
+               }.get(r["method"], "")
+        self.d_note.setText(f"Live reading with the new calibration, in the dashboard's weighting (L{mw}{mt}), "
+                            "with the other weightings underneath. A-weighting reads lower than C or Z on pink "
+                            "noise and on bass-heavy sound, often by 3 to 10 dB, so compare like with like. " + how)
+        self.d_warn.setText("" if r.get("level_set", True) else
+                            "The frequency correction is loaded, but the absolute level isn't set yet. This file has "
+                            "no Sens Factor (normal for analog mics like the TM1). After Save, the wizard takes you "
+                            "straight to the level step: use a calibrator or match a reference meter.")
         self.d_sum.setText(f"<b>Profile:</b> {name}<br><b>Method:</b> {r['method']}<br>"
                            f"<b>Offset:</b> {r['offset']:.2f} dB (was {prof['offset']:.2f}, "
                            f"change {r['offset'] - prof['offset']:+.2f} dB)<br>"
@@ -2419,7 +2772,8 @@ class CalWizard(QtWidgets.QDialog):
     def save(self):
         name, prof = self.base_profile()
         prof.update(self.result)
-        prof.update(calibrated=True, cal_info=self.result["info"], date=datetime.datetime.now().isoformat(),
+        level_set = self.result.pop("level_set", True)
+        prof.update(calibrated=bool(level_set), cal_info=self.result["info"], date=datetime.datetime.now().isoformat(),
                     use_curve=bool(self.result["cal_points"]))
         if self.p_auto.isChecked():
             prof.update(auto_select=True, device_hint=self.main.dev.currentText())
@@ -2427,13 +2781,28 @@ class CalWizard(QtWidgets.QDialog):
         self.main.cfg["profiles"][name] = prof
         self.main.set_profile(name)
         self.main.add_event(f"Calibrated '{name}': offset {prof['offset']:.2f} dB ({prof['method']})")
+        if not level_set:            # curve saved; now set the absolute level on the same profile
+            self.p_combo.clear(); self.p_combo.addItems(list(self.main.cfg["profiles"]))
+            self.p_existing.setChecked(True); self.p_combo.setCurrentText(name); self.p_name.clear()
+            self.m_ref.setChecked(True)
+            self.result, self.cal_raw, self.ref_raw = None, None, None
+            self.history = [0, 1]
+            self.show_page(1)
+            self.title.setText(f"2 · Now set the level for '{name}'")
+            return
         self.accept()
 
     def done(self, r):
         self.timer.stop()
+        self.r_noise.stop()
         e = self.main.engine
         if e is not None:
             e.cal_target = 0
+            if hasattr(e, "_wiz_curve"):
+                del e._wiz_curve
+                prof = self.main.active_profile()
+                pts = prof.get("cal_points") if prof.get("use_curve") else None
+                e.calfilt = CalFilter(pts, e.fs) if pts else None
         super().done(r)
 
 
@@ -2650,10 +3019,21 @@ def osc_message(addr, *args):
     return pad(addr.encode()) + pad(tags.encode()) + payload
 
 
+def big_digits(level_text, unit="dBA"):
+    """Split a reading over 4 Stream Deck buttons: tens, ones, decimal, unit.
+    '87.3' -> ['8', '7', '.3', 'dBA'];  '102.4' -> ['10', '2', '.4', 'dBA'];  '--.-' -> ['-', '-', '.-', 'dBA']"""
+    t = (level_text or "").strip()
+    if not t:
+        return ["", "", "", unit]
+    whole, _, dec = t.partition(".")
+    return [whole[:-1], whole[-1:], "." + (dec[:1] or "0"), unit]
+
+
 class CompanionLink:
     """Pushes the live level to Bitfocus Companion over OSC (UDP, default port 12321):
-    custom variables spl_level, spl_leq1m, spl_leqlong, spl_peak, spl_dose, spl_state, spl_color, spl_item
-    and, optionally, the text + background colour of one button."""
+    custom variables spl_level, spl_leq1m, spl_leqlong, spl_peak, spl_dose, spl_state, spl_color, spl_item,
+    spl_d1..spl_d4 (the reading split over 4 buttons), and, optionally, paints the text + background colour of
+    either one button (level + weighting) or a row of 4 buttons that together show the reading big."""
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.last = 0.0
@@ -2668,8 +3048,19 @@ class CompanionLink:
         msgs = [osc_message(f"/custom-variable/spl_{k}/value", str(v)) for k, v in (
             ("level", d["level"]), ("leq1m", d["leq1m"]), ("leqlong", d["leqlong"]), ("peak", d["peak"]),
             ("dose", d["dose"]), ("state", d["state"]), ("color", d["color"]), ("item", d.get("item", "")))]
+        digits = big_digits(d["level"], "dB" + d["label"][1:2] if d.get("label") else "dBA")
+        msgs += [osc_message(f"/custom-variable/spl_d{i + 1}/value", v) for i, v in enumerate(digits)]
         loc = (cfg.get("companion_button") or "").strip()
-        if re.fullmatch(r"\d+/\d+/\d+", loc):
+        four = cfg.get("companion_layout") == "four"
+        if four and re.fullmatch(r"\d+/\d+/\d+", loc):
+            pg, row, col = map(int, loc.split("/"))
+            q = QtGui.QColor(d["color"])
+            for i, v in enumerate(digits):
+                at = f"/location/{pg}/{row}/{col + i}/style"
+                msgs.append(osc_message(f"{at}/text", v))
+                msgs.append(osc_message(f"{at}/bgcolor", q.red(), q.green(), q.blue()))
+                msgs.append(osc_message(f"{at}/color", 255, 255, 255))
+        elif re.fullmatch(r"\d+/\d+/\d+", loc):
             q = QtGui.QColor(d["color"])
             msgs.append(osc_message(f"/location/{loc}/style/text", f"{d['level']}\n{d['label']}"))
             msgs.append(osc_message(f"/location/{loc}/style/bgcolor", q.red(), q.green(), q.blue()))
@@ -2698,14 +3089,62 @@ def secret_get(account):
 
 
 def secret_set(account, value):
+    """Store a secret in the macOS Keychain. Returns False (caller keeps it in the config) when that fails."""
     if sys.platform == "darwin":
         try:
-            subprocess.run(["security", "add-generic-password", "-U", "-s", "ServiceSPL", "-a", account, "-w", value],
-                           capture_output=True, timeout=5)
-            return True
+            r = subprocess.run(["security", "add-generic-password", "-U", "-s", "ServiceSPL", "-a", account,
+                                "-w", value], capture_output=True, timeout=5)
+            return r.returncode == 0 and secret_get(account) == value
         except Exception:
             return False
     return False
+
+
+def https_context():
+    """TLS context with a CA bundle that works inside the packaged app. The python.org Python in the Mac build
+    has no system certificates, so without this every HTTPS call fails with CERTIFICATE_VERIFY_FAILED."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    ctx = ssl.create_default_context()
+    for path in ("/etc/ssl/cert.pem", "/private/etc/ssl/cert.pem"):     # macOS system bundle
+        if os.path.exists(path):
+            try:
+                ctx.load_verify_locations(cafile=path)
+                break
+            except Exception:
+                pass
+    return ctx
+
+
+def clean_key(text):
+    """Planning Center IDs/secrets are hex: drop spaces, line breaks, quotes and labels pasted along with them."""
+    t = (text or "").strip().strip('"\'')
+    t = re.sub(r"^(application\s*id|app\s*id|client\s*id|secret)\s*[:=]\s*", "", t, flags=re.I)
+    return re.sub(r"\s+", "", t)
+
+
+def pco_error_text(e):
+    """Plain-English reason a Planning Center call failed."""
+    if isinstance(e, urllib.error.HTTPError):
+        if e.code == 401:
+            return ("Planning Center rejected the Application ID / Secret (401). Copy both again from the "
+                    "Personal Access Token page: the ID goes in the first box, the Secret in the second.")
+        if e.code == 403:
+            return ("Planning Center accepted the token but this account can't read Services (403). "
+                    "Use a login with access to Services.")
+        if e.code == 429:
+            return "Planning Center is rate-limiting requests (429). Wait a minute and try again."
+        return f"Planning Center answered HTTP {e.code} {e.reason}"
+    reason = getattr(e, "reason", e)
+    if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+        return ("Couldn't verify Planning Center's security certificate. Check the Mac's date and time, and "
+                "that no web filter is intercepting HTTPS.")
+    if isinstance(reason, (socket.gaierror, socket.timeout, TimeoutError, ConnectionError, OSError)):
+        return f"Couldn't reach Planning Center (no internet or blocked): {reason}"
+    return str(e)
 
 
 class PcoClient:
@@ -2713,13 +3152,14 @@ class PcoClient:
     BASE = "https://api.planningcenteronline.com/services/v2"
 
     def __init__(self, app_id, secret):
-        self.auth = "Basic " + base64.b64encode(f"{app_id}:{secret}".encode()).decode()
+        self.auth = "Basic " + base64.b64encode(f"{clean_key(app_id)}:{clean_key(secret)}".encode()).decode()
+        self.ctx = https_context()
 
     def get(self, path, **params):
         url = self.BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
         req = urllib.request.Request(url, headers={"Authorization": self.auth, "Accept": "application/json",
                                                    "User-Agent": f"ServiceSPL/{APP_VERSION}"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=self.ctx) as r:
             return json.load(r)
 
     def service_types(self):
@@ -2787,7 +3227,7 @@ class PcoFollower:
                 self.current = self.client.live_item(self.st, self.plan)
                 self.error = ""
             except Exception as e:
-                self.error = str(e)
+                self.error = pco_error_text(e)
 
 
 def item_stats(sess, t0, t1):
@@ -2972,23 +3412,31 @@ def schedule_window(entry, now):
 
 class ScheduleDialog(QtWidgets.QDialog):
     """Edit recurring (weekly) or one-off logging windows."""
+    DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"]
+
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Logging schedule")
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(820)
+        self.setMinimumHeight(320)
         self.cfg = cfg
         v = QtWidgets.QVBoxLayout(self)
-        v.addWidget(QtWidgets.QLabel("Logging starts and stops by itself inside these windows. The meter starts "
-                                     "automatically if it isn't running. Leave Date empty for every week."))
-        self.table = QtWidgets.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["On", "Days", "Date (one-off)", "Start", "Stop", "New session + report"])
-        self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        intro = QtWidgets.QLabel("Logging starts and stops by itself inside these windows. The meter starts "
+                                 "automatically if it isn't running. Leave Date empty to repeat every week.")
+        intro.setWordWrap(True)
+        v.addWidget(intro)
+        self.table = QtWidgets.QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["On", "Days", "Date (one-off)", "Start", "Stop",
+                                              "New session + report", ""])
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
-        v.addWidget(self.table)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        v.addWidget(self.table, 1)
         b = QtWidgets.QHBoxLayout()
         add = QtWidgets.QPushButton("+ Add window"); add.clicked.connect(lambda: self.add_row({}))
-        rem = QtWidgets.QPushButton("− Remove"); rem.clicked.connect(lambda: self.table.removeRow(self.table.currentRow()))
-        b.addWidget(add); b.addWidget(rem); b.addStretch()
+        b.addWidget(add); b.addStretch()
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject)
         b.addWidget(bb)
@@ -2996,35 +3444,75 @@ class ScheduleDialog(QtWidgets.QDialog):
         for e in cfg["schedule"]:
             self.add_row(e)
 
+    @staticmethod
+    def _centered(w):
+        box = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(box); h.setContentsMargins(6, 0, 6, 0)
+        h.addWidget(w, 0, QtCore.Qt.AlignCenter)
+        box.inner = w
+        return box
+
     def add_row(self, e):
         r = self.table.rowCount()
         self.table.insertRow(r)
         on = QtWidgets.QCheckBox(); on.setChecked(e.get("on", True))
-        self.table.setCellWidget(r, 0, on)
-        days = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(days); h.setContentsMargins(2, 0, 2, 0); h.setSpacing(2)
+        self.table.setCellWidget(r, 0, self._centered(on))
+        days = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(days); h.setContentsMargins(4, 2, 4, 2); h.setSpacing(3)
         sel = e.get("days", [6])
-        for i, dname in enumerate(DAYS):
-            cb = QtWidgets.QCheckBox(dname[:2]); cb.setChecked(i in sel); h.addWidget(cb)
+        days.buttons = []
+        for i, letter in enumerate(self.DAY_LETTERS):
+            btn = QtWidgets.QToolButton(); btn.setText(letter); btn.setCheckable(True); btn.setChecked(i in sel)
+            btn.setToolTip(DAYS[i]); btn.setFixedSize(28, 28)
+            btn.setStyleSheet(f"QToolButton {{ border:1px solid {T['btn_border']}; border-radius:14px; "
+                              f"background:{T['btn']}; color:{T['fg']}; font-weight:600; padding:0; }}"
+                              f"QToolButton:checked {{ background:{T['accent']}; border-color:{T['accent']}; "
+                              "color:#ffffff; }")
+            h.addWidget(btn); days.buttons.append(btn)
         self.table.setCellWidget(r, 1, days)
         date = QtWidgets.QLineEdit(e.get("date", "")); date.setPlaceholderText("YYYY-MM-DD")
         self.table.setCellWidget(r, 2, date)
         for c, key, dflt in ((3, "start", "09:00"), (4, "stop", "12:30")):
-            te = QtWidgets.QTimeEdit(QtCore.QTime.fromString(e.get(key, dflt), "HH:mm")); te.setDisplayFormat("HH:mm")
+            te = QtWidgets.QTimeEdit(QtCore.QTime.fromString(e.get(key, dflt), "HH:mm"))
+            te.setDisplayFormat("h:mm AP")
+            te.setMinimumWidth(110)
             self.table.setCellWidget(r, c, te)
         rep = QtWidgets.QCheckBox(); rep.setChecked(e.get("report", True))
-        self.table.setCellWidget(r, 5, rep)
+        self.table.setCellWidget(r, 5, self._centered(rep))
+        trash = QtWidgets.QToolButton(); trash.setText("🗑"); trash.setToolTip("Remove this schedule item")
+        trash.setAutoRaise(True); trash.setCursor(QtCore.Qt.PointingHandCursor)
+        trash.setStyleSheet("QToolButton { font-size:14pt; padding:2px 6px; }"
+                            f"QToolButton:hover {{ background:{T['red']}; border-radius:6px; }}")
+        trash.clicked.connect(lambda _=False, w=trash: self.remove_row_of(w))
+        self.table.setCellWidget(r, 6, self._centered(trash))
         self.table.resizeRowsToContents()
+        self.table.resizeColumnsToContents()
+
+    def remove_row_of(self, w):
+        for r in range(self.table.rowCount()):
+            cell = self.table.cellWidget(r, 6)
+            if cell is not None and cell.inner is w:
+                self.table.removeRow(r)
+                return
 
     def apply(self):
         out = []
         for r in range(self.table.rowCount()):
-            days = [i for i, cb in enumerate(self.table.cellWidget(r, 1).findChildren(QtWidgets.QCheckBox)) if cb.isChecked()]
-            out.append(dict(on=self.table.cellWidget(r, 0).isChecked(), days=days,
+            days = [i for i, b in enumerate(self.table.cellWidget(r, 1).buttons) if b.isChecked()]
+            out.append(dict(on=self.table.cellWidget(r, 0).inner.isChecked(), days=days,
                             date=self.table.cellWidget(r, 2).text().strip(),
                             start=self.table.cellWidget(r, 3).time().toString("HH:mm"),
                             stop=self.table.cellWidget(r, 4).time().toString("HH:mm"),
-                            report=self.table.cellWidget(r, 5).isChecked()))
+                            report=self.table.cellWidget(r, 5).inner.isChecked()))
         self.cfg["schedule"] = out
+
+
+def ampm(hhmm):
+    """'13:30' -> '1:30 PM' (schedule times are stored as 24-hour strings)."""
+    try:
+        h, m = map(int, hhmm.split(":"))
+    except (ValueError, AttributeError):
+        return hhmm
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
 
 
 EQ_TARGETS = {
@@ -3106,14 +3594,22 @@ GUIDE_PAGES = [
 <li>Press <b>▶ Start</b>. The big number is the live level; the strip under it is the last few minutes.</li>
 <li><b>Calibrate</b> once per mic (next page), so the numbers are real dB SPL.</li>
 <li>Set <b>Red at</b> to your house limit. Everything turns yellow 5 dB before that and red at it.</li></ol>
-<p>Panels around the meter (RTA, dosimeter, theater cal, session, Planning Center) can be dragged, stacked, floated or
-hidden from the <b>View</b> menu. The layout is remembered.</p>"""),
+<p>Panels around the meter (RTA, spectrogram, dosimeter, session, Planning Center) can be dragged, stacked or
+hidden from the <b>View</b> menu. The layout is remembered. Click <b>🔒</b> at the end of the panel buttons to unlock
+them, drag the buttons into the order you like, then lock them again.</p>"""),
     ("Calibrate your mic", """<h2>Calibrate your mic</h2>
 <p>Each mic gets a <b>profile</b>. Run <b>Calibrate…</b> and pick one of three ways:</p>
 <ul><li><b>Acoustic calibrator</b> (best): put a 94 or 114 dB calibrator on the mic, wait for “steady”, press Measure.</li>
 <li><b>Cal file</b>: load the UMIK-1/UMIK-2 file from miniDSP (enter your serial number on their site). This fixes the
 frequency response and, with the Mac's input volume for the mic at 100 %, sets the level from the Sens Factor.
 Use the <b>90°</b> file when the mic points at the ceiling.</li>
+<li><b>Pink noise from my speakers + a reference SPL meter</b>: gain and phantom set first. Put the
+mic on a stand at the main listening position, pointing at the ceiling, with your handheld meter right next to it
+at the same height. Press <b>Play pink noise</b> on that page (pick the output feeding your speakers, Left + Right) at about -20 dBFS, or
+use your console's generator, and bring the
+speakers up until the handheld reads about 85 dB. Set the handheld and ServiceSPL to the <b>same weighting and
+speed</b> (Z and Slow is easiest, C on both if the handheld has no Z). Wait for the readings to settle, type the
+handheld's reading, press Measure (10 s), check, then Save.</li>
 <li><b>Manual</b>: type the mic's mV/Pa and your interface gain, or an offset you already know.</li></ul>
 <p>Tick “pick automatically” and the profile follows that mic whenever you select it. The status bar shows which profile
 is active and warns when a calibration is over 30 days old.</p>"""),
@@ -3130,20 +3626,11 @@ Press <b>M</b> (or ◆ Marker) to drop markers like “sermon” or “band in�
 <li><b>OSHA HC</b>: 90 dBA for 8 h with a 5 dB exchange; 50 % is the action level for hearing protection programs.</li>
 <li><b>OSHA PEL</b>: the legal limit (ignores anything under 90 dBA).</li></ul>
 <p>Reset the dose at the start of a shift or call time. It survives Stop/Start. Guidance only, not a certified dosimeter.</p>"""),
-    ("Theater calibration", """<h2>Theater / room level calibration</h2>
-<ol><li>Open the <b>Theater calibration</b> panel and pick your interface as the Output, the format (5.1, 7.1, 7.1.4…) and
-the room preset (cinema: 85 dBC screen, 82 dBC surrounds).</li>
-<li>Check the <b>Out</b> column matches your patch (L R C LFE Ls Rs is the SMPTE order).</li>
-<li>Put the mic at the main listening position, pointing at the ceiling (90° cal file).</li>
-<li>Press <b>▶ Play</b>, adjust the amp/processor until it says <b>on target ✓</b>, then <b>Next ▶</b>.
-Or press <b>Auto run</b> to measure every channel in one go and fix the red ones afterwards.</li></ol>
-<p>Noise is -20 dBFS RMS (AES17) band-limited 500 Hz – 2 kHz, the SMPTE/Dolby standard. LFE is always band-limited to
-20 – 120 Hz; its target is a starting point, confirm it on the RTA (about +10 dB in-band over the screen channels).</p>"""),
     ("Room EQ", "__EQ__"),
     ("Logging & reports", """<h2>Logging, schedules and reports</h2>
 <ul><li><b>● Log</b> writes a CSV every 1 s / 10 s / 1 min with Leq, max, peak, LA10/90, dose, markers and the current
 Planning Center item.</li>
-<li><b>Schedule…</b> (Session panel) starts and stops logging by itself, e.g. every Sunday 08:30 – 12:30.</li>
+<li><b>Schedule…</b> (Session panel) starts and stops logging by itself, e.g. every Sunday 8:30 AM – 12:30 PM. Each item has a 🗑 button to remove it.</li>
 <li><b>Auto-save folder</b> (Settings → Logging): point it at your OneDrive folder. Logs, the session CSV and the PDF
 report are saved there in dated folders (YYYY / YYYY-MM-DD - plan) and OneDrive syncs them.</li>
 <li><b>PDF report</b>: summary, time history, markers, alarms and per-item levels for the service.</li></ul>"""),
@@ -3231,7 +3718,7 @@ class GuideWizard(QtWidgets.QDialog):
 
     ACTIONS = {"Welcome": "▶ Start the meter", "Calibrate your mic": "Open the calibration wizard…",
                "Monitoring a show": "Show the Session panel", "Hearing dose": "Show the dosimeter",
-               "Theater calibration": "Show the theater panel", "Logging & reports": "Edit the schedule…",
+               "Logging & reports": "Edit the schedule…",
                "Companion, NDI & web": "Open Settings…", "Planning Center": "Show the Planning Center panel"}
 
     def _page(self, i):
@@ -3247,9 +3734,8 @@ class GuideWizard(QtWidgets.QDialog):
             m.run_btn.click()
         elif t == "Calibrate your mic":
             m.calibrate()
-        elif t in ("Monitoring a show", "Hearing dose", "Theater calibration", "Planning Center"):
-            key = {"Monitoring a show": "session", "Hearing dose": "dose", "Theater calibration": "theater",
-                   "Planning Center": "pco"}[t]
+        elif t in ("Monitoring a show", "Hearing dose", "Planning Center"):
+            key = {"Monitoring a show": "session", "Hearing dose": "dose", "Planning Center": "pco"}[t]
             m.docks[key].show(); m.docks[key].raise_()
         elif t == "Logging & reports":
             m.edit_schedule()
@@ -3261,7 +3747,7 @@ class GuideWizard(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(w)
         intro = QtWidgets.QLabel(
             "<h2>Room EQ with the RTA</h2>"
-            "<ol><li>Pick the output/channel for the speaker you're tuning and press <b>Play pink noise</b> "
+            "<ol><li>Pick the output and channels for the speakers you're tuning and press <b>Play pink noise</b> "
             "(full-band, -20 dBFS). Bring it up to a comfortable 80–85 dBC.</li>"
             "<li>Put the mic where people listen. Press <b>Measure position</b> (10 s average). Measure 3–5 seats "
             "and the app averages them, which stops you EQing one seat's quirks.</li>"
@@ -3269,19 +3755,12 @@ class GuideWizard(QtWidgets.QDialog):
             "Prefer cuts; big dips are usually room nulls that EQ can't fix.</li></ol>")
         intro.setWordWrap(True)
         v.addWidget(intro)
+        self.eq_noise = NoiseControls(self.main)
+        v.addWidget(self.eq_noise)
         row = QtWidgets.QHBoxLayout()
-        self.eq_out = QtWidgets.QComboBox()
-        th = self.main.theater
-        for i in range(th.out.count()):
-            self.eq_out.addItem(th.out.itemText(i), th.out.itemData(i))
-        self.eq_out.setCurrentIndex(th.out.currentIndex())
-        self.eq_ch = QtWidgets.QSpinBox(); self.eq_ch.setRange(1, 64); self.eq_ch.setPrefix("Out ")
         self.eq_target = QtWidgets.QComboBox(); self.eq_target.addItems(list(EQ_TARGETS))
         self.eq_target.currentTextChanged.connect(self.recompute)
-        self.eq_play = QtWidgets.QPushButton("▶ Play pink noise"); self.eq_play.setCheckable(True)
-        self.eq_play.clicked.connect(self.toggle_noise)
-        row.addWidget(self.eq_out, 2); row.addWidget(self.eq_ch); row.addWidget(QtWidgets.QLabel("Target"))
-        row.addWidget(self.eq_target, 2); row.addWidget(self.eq_play)
+        row.addWidget(QtWidgets.QLabel("Target curve")); row.addWidget(self.eq_target, 1)
         v.addLayout(row)
         row2 = QtWidgets.QHBoxLayout()
         self.eq_meas = QtWidgets.QPushButton("Measure position (10 s)"); self.eq_meas.clicked.connect(self.measure)
@@ -3295,31 +3774,8 @@ class GuideWizard(QtWidgets.QDialog):
         self.eq_tips = QtWidgets.QListWidget()
         self.eq_tips.setMaximumHeight(130)
         v.addWidget(self.eq_tips)
-        self.eq_player = NoisePlayer()
         self.eq_bank = None
         return w
-
-    def toggle_noise(self, on):
-        m = self.main
-        if on:
-            if not m.running():
-                m.run_btn.click()
-            try:
-                fs = self.eq_player.open(self.eq_out.currentData(), self.eq_ch.value() - 1)
-            except Exception as ex:
-                self.eq_play.setChecked(False)
-                QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not open the output:\n{ex}")
-                return
-            self.eq_player.set_buffer(make_pink(fs, 20, min(20000, fs * 0.45), -20.0, seed=7))
-            self.eq_player.ch = self.eq_ch.value() - 1
-            if m.sim is not None and self.eq_out.currentData() is None:
-                m.sim.inject = self.eq_player
-            self.eq_play.setText("■ Stop noise")
-        else:
-            self.eq_player.stop()
-            if m.sim is not None and m.sim.inject is self.eq_player:
-                m.sim.inject = None
-            self.eq_play.setText("▶ Play pink noise")
 
     def measure(self):
         e = self.main.engine
@@ -3366,7 +3822,7 @@ class GuideWizard(QtWidgets.QDialog):
 
     def done(self, r):
         self.timer.stop()
-        self.toggle_noise(False)
+        self.eq_noise.stop()
         super().done(r)
 
 
@@ -3384,6 +3840,11 @@ class PcoPanel(QtWidgets.QWidget):
         self.secret = QtWidgets.QLineEdit(); self.secret.setEchoMode(QtWidgets.QLineEdit.Password)
         self.secret.setPlaceholderText("Secret")
         self.secret.setText(secret_get("pco") or c.get("pco_secret", ""))
+        self.show_secret = QtWidgets.QCheckBox("Show"); self.show_secret.setToolTip("Show the secret while you check it")
+        self.show_secret.toggled.connect(lambda on: self.secret.setEchoMode(
+            QtWidgets.QLineEdit.Normal if on else QtWidgets.QLineEdit.Password))
+        self.app_id.returnPressed.connect(self.connect_pco)
+        self.secret.returnPressed.connect(self.connect_pco)
         con = QtWidgets.QPushButton("Connect"); con.clicked.connect(self.connect_pco)
         tok = QtWidgets.QPushButton("Open token page")
         tok.setToolTip("Create a Personal Access Token in your browser")
@@ -3399,7 +3860,7 @@ class PcoPanel(QtWidgets.QWidget):
         g.addWidget(self.app_id, 0, 0); g.addWidget(self.secret, 0, 1); g.addWidget(con, 0, 2)
         g.addWidget(self.st, 1, 0); g.addWidget(self.plan, 1, 1); g.addWidget(self.follow, 1, 2)
         g.addWidget(self.target, 2, 0)
-        hb = QtWidgets.QHBoxLayout(); hb.addWidget(tok); hb.addWidget(hlp)
+        hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.show_secret); hb.addWidget(tok); hb.addWidget(hlp)
         g.addLayout(hb, 2, 1, 1, 2)
         v.addLayout(g)
         self.status = QtWidgets.QLabel("Not connected")
@@ -3425,22 +3886,33 @@ class PcoPanel(QtWidgets.QWidget):
         self.status.setStyleSheet(f"color:{T['dim']};")
         self.now.setStyleSheet("font-size:15pt; font-weight:700;")
 
-    def connect_pco(self):
-        a, s = self.app_id.text().strip(), self.secret.text().strip()
+    def connect_pco(self, quiet=False):
+        a, s = clean_key(self.app_id.text()), clean_key(self.secret.text())
         if not (a and s):
-            self.status.setText("Enter the Application ID and Secret of a Personal Access Token")
+            if not quiet:
+                self.status.setText("Enter the Application ID and Secret of a Personal Access Token")
             return
-        self.main.cfg["pco_app_id"] = a
-        if not secret_set("pco", s):
-            self.main.cfg["pco_secret"] = s
-        self.main.save_cfg()
+        if a == s:
+            self.status.setText("The Application ID and Secret are the same: paste the Secret into the second box")
+            return
+        self.app_id.setText(a); self.secret.setText(s)
+        self.status.setText("Connecting to Planning Center…")
+        QtWidgets.QApplication.processEvents()
         self.client = PcoClient(a, s)
         try:
             sts = self.client.service_types()
         except Exception as e:
-            hint = " (check the Application ID and Secret)" if "401" in str(e) else ""
-            self.status.setText(f"Couldn't connect: {e}{hint}")
+            self.client = None
+            self.status.setText(f"Couldn't connect: {pco_error_text(e)}")
+            self.status.setStyleSheet(f"color:{T['red']};")
             return
+        self.status.setStyleSheet(f"color:{T['dim']};")
+        self.main.cfg["pco_app_id"] = a          # save only keys that worked
+        if secret_set("pco", s):
+            self.main.cfg.pop("pco_secret", None)
+        else:
+            self.main.cfg["pco_secret"] = s
+        self.main.save_cfg()
         self.st.blockSignals(True); self.st.clear()
         for i, n in sts:
             self.st.addItem(n, i)
@@ -3457,7 +3929,7 @@ class PcoPanel(QtWidgets.QWidget):
         try:
             plans = self.client.plans(self.st.currentData())
         except Exception as e:
-            self.status.setText(f"Couldn't load plans: {e}")
+            self.status.setText(f"Couldn't load plans: {pco_error_text(e)}")
             return
         self.plan.clear()
         today = datetime.date.today().isoformat()
@@ -3482,7 +3954,7 @@ class PcoPanel(QtWidgets.QWidget):
                 self.status.setText("Connect and pick a plan first")
 
     def manual_item(self):
-        txt, ok = QtWidgets.QInputDialog.getText(self, "Current item", "Item name (e.g. Worship set, Sermon):")
+        txt, ok = get_text(self, "Current item", "Item name (e.g. Worship set, Sermon):")
         if ok and txt.strip():
             self.main.set_item(txt.strip())
 
@@ -3693,11 +4165,18 @@ class SettingsDialog(QtWidgets.QDialog):
         self.comp.setChecked(cfg["companion_on"])
         self.ch = QtWidgets.QLineEdit(cfg["companion_host"])
         self.cp = QtWidgets.QSpinBox(); self.cp.setRange(1, 65535); self.cp.setValue(int(cfg["companion_port"]))
-        self.cb = QtWidgets.QLineEdit(cfg["companion_button"]); self.cb.setPlaceholderText("optional page/row/column, e.g. 1/0/0")
+        self.cb = QtWidgets.QLineEdit(cfg["companion_button"]); self.cb.setPlaceholderText("optional page/row/column, e.g. 1/0/0 (leftmost for 4 buttons)")
         f.addRow(self.comp)
         f.addRow("Companion computer", self.ch)
         f.addRow("Companion OSC port", self.cp)
-        f.addRow("Paint this button", self.cb)
+        self.clay = QtWidgets.QComboBox()
+        self.clay.addItem("One button: level + weighting", "one")
+        self.clay.addItem("Four buttons in a row: 8 · 7 · .3 · dBA", "four")
+        self.clay.setCurrentIndex(max(0, self.clay.findData(cfg.get("companion_layout", "one"))))
+        self.clay.setToolTip("Four buttons: the button above and the 3 to its right show tens, ones, decimal and "
+                             "the unit, all coloured green / yellow / red. Set their text size to Auto in Companion.")
+        f.addRow("Paint button(s)", self.clay)
+        f.addRow("Button location", self.cb)
         self.port = QtWidgets.QSpinBox(); self.port.setRange(1024, 65535); self.port.setValue(cfg["web_port"])
         f.addRow("Web view / API port", self.port)
         self.ndi_name = QtWidgets.QLineEdit(cfg["ndi_name"])
@@ -3727,7 +4206,7 @@ class SettingsDialog(QtWidgets.QDialog):
         if d:
             self.auto.setText(d)
         else:
-            QtWidgets.QMessageBox.information(self, APP_NAME, "Couldn't find a OneDrive folder. Install OneDrive, "
+            message(self, "info", APP_NAME, "Couldn't find a OneDrive folder. Install OneDrive, "
                                               "sign in, then press Browse and pick it (Finder → OneDrive).")
 
     def _ndi_lib(self):
@@ -3746,6 +4225,7 @@ class SettingsDialog(QtWidgets.QDialog):
                    autosave_dir=self.auto.text().strip(), autosave_reports=self.auto_rep.isChecked(),
                    companion_on=self.comp.isChecked(), companion_host=self.ch.text().strip() or "127.0.0.1",
                    companion_port=self.cp.value(), companion_button=self.cb.text().strip(),
+                   companion_layout=self.clay.currentData(),
                    ndi_name=self.ndi_name.text().strip() or "ServiceSPL", ndi_size=self.ndi_size.currentText(),
                    ndi_transparent=self.ndi_tr.isChecked(), ndi_lib=self.ndi_lib.text().strip())
 
@@ -3866,7 +4346,8 @@ def merge_cfg(saved):
     for k in ("cal_offset", "calibrated", "cal_info"):
         saved.pop(k, None)
     cfg.update(saved)
-    for k in ("theater",):
+    cfg.pop("theater", None)                  # Theater calibration was removed in 2.1
+    for k in ("noise",):
         merged = copy.deepcopy(DEFAULTS[k]); merged.update(cfg.get(k) or {}); cfg[k] = merged
     if cfg["profile"] not in cfg["profiles"]:
         cfg["profile"] = next(iter(cfg["profiles"]))
@@ -3900,6 +4381,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.menubar_meter = None
         self.companion = CompanionLink()
         self.ndi = None
+        self.noise_player = NoisePlayer()     # pink noise out of the speakers (calibration, room EQ)
+        self.noise_player.owner = None
         self.card = {"level": "--.-", "color": "#8a9099", "state": "off", "sub": "stopped"}
         self.current_item = ""
         self.pco_plan_label = ""
@@ -3960,7 +4443,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if include_secret is None:
             include_secret = False
             if secret:
-                r = QtWidgets.QMessageBox.question(
+                r = ask_box(
                     self, "Include the Planning Center secret?",
                     "Include your Planning Center secret in the file?\n\nYes: importing restores the PCO "
                     "connection too, but anyone with the file can read your Planning Center data. Keep it somewhere "
@@ -3978,7 +4461,7 @@ class MainWindow(QtWidgets.QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except OSError as ex:
-            QtWidgets.QMessageBox.warning(self, "Export settings", f"Couldn't write the file:\n{ex}")
+            message(self, "warn", "Export settings", f"Couldn't write the file:\n{ex}")
             return None
         n = len(self.cfg["profiles"])
         self.status.showMessage(f"Settings exported ({n} mic profile{'s' if n != 1 else ''}"
@@ -4002,11 +4485,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("This isn't a ServiceSPL settings file.")
             cfg = merge_cfg(saved)
         except Exception as ex:
-            QtWidgets.QMessageBox.warning(self, "Import settings", f"Couldn't read that file:\n{ex}")
+            message(self, "warn", "Import settings", f"Couldn't read that file:\n{ex}")
             return False
         if confirm:
             profs = ", ".join(cfg["profiles"])
-            r = QtWidgets.QMessageBox.question(
+            r = ask_box(
                 self, "Import settings",
                 f"Replace all current settings with the ones in this file?\n\nMic profiles: {profs}\n"
                 f"Exported {data.get('exported', 'from a config file')}"
@@ -4048,7 +4531,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for t in self.meter.tiles():
             t.refresh_theme()
         self.meter.apply_style()
-        for w in (self.dose_panel, self.theater, self.mini, self.pco_panel):
+        for w in (self.dose_panel, self.mini, self.pco_panel):
             if w is not None:
                 w.refresh_theme()
         self.apply_cfg_to_ui()
@@ -4080,9 +4563,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_btn.setCheckable(True); self.log_btn.clicked.connect(self.toggle_log)
         mk = QtWidgets.QPushButton("◆ Marker"); mk.setToolTip("Drop a marker in the session and log (M)")
         mk.clicked.connect(lambda: self.add_marker())
-        for w in (self.dev, self.ch, self.run_btn, self.prof_cb, cal, rst, self.log_btn, mk):
-            tb.addWidget(w)
-        tb.addSeparator()
+        red = QtWidgets.QWidget()
+        rl = QtWidgets.QHBoxLayout(red); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(2)
         lbl = QtWidgets.QLabel("  Red at ")
         self.red_lbl = lbl
         self.red_at = QtWidgets.QDoubleSpinBox()
@@ -4090,29 +4572,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.red_at.setSuffix(" dB"); self.red_at.setValue(self.cfg["alarm"])
         self.red_at.setToolTip("Readings at or above this level turn red and show thumbs down")
         self.red_at.valueChanged.connect(self.set_red_at)
-        tb.addWidget(lbl); tb.addWidget(self.red_at)
         red_tip = InfoTip(GLOSSARY["Red at"]); red_tip.setContentsMargins(4, 0, 4, 0)
-        tb.addWidget(red_tip)
-        tb.addSeparator()
-        mini_btn = QtWidgets.QPushButton("Mini ⤡")
-        mini_btn.setToolTip("Shrink to a small always-on-top box")
-        mini_btn.clicked.connect(self.enter_mini)
-        tb.addWidget(mini_btn)
+        rl.addWidget(lbl); rl.addWidget(self.red_at); rl.addWidget(red_tip)
+        st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
+        self.top_bar = ReorderBar("top")
+        for key, w in (("input", self.dev), ("channel", self.ch), ("start", self.run_btn), ("profile", self.prof_cb),
+                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn), ("marker", mk)):
+            self.top_bar.add(key, w)
+        self.top_bar.divider("div_top1")
+        self.top_bar.add("red_at", red)
+        self.top_bar.divider("div_top2")
+        self.top_bar.add("settings", st)
+        tb.addWidget(self.top_bar)
+
+        # Mini, Web view and NDI: their own bar at the bottom of the window
+        self.mini_btn = QtWidgets.QPushButton("Mini ⤡")
+        self.mini_btn.setToolTip("Shrink to a small always-on-top box")
+        self.mini_btn.clicked.connect(self.enter_mini)
         self.web_btn = QtWidgets.QPushButton("Web view")
         self.web_btn.setCheckable(True)
         self.web_btn.setToolTip("Show the meter in a browser on another computer (e.g. the Proton)")
         self.web_btn.clicked.connect(self.toggle_web)
-        tb.addWidget(self.web_btn)
         self.ndi_btn = QtWidgets.QPushButton("NDI")
         self.ndi_btn.setCheckable(True)
         self.ndi_btn.setToolTip("Send just the meter graphic as an NDI source for your video switcher")
         self.ndi_btn.clicked.connect(self.toggle_ndi)
-        tb.addWidget(self.ndi_btn)
-        st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
-        tb.addWidget(st)
-        gd = QtWidgets.QPushButton("? Guide"); gd.setToolTip("Step-by-step guide and room EQ helper")
-        gd.clicked.connect(lambda: self.guide())
-        tb.addWidget(gd)
+        bottom = QtWidgets.QToolBar("Outputs"); bottom.setObjectName("outputs_bar"); bottom.setMovable(False)
+        self.addToolBar(QtCore.Qt.BottomToolBarArea, bottom)
+        out_lbl = QtWidgets.QLabel("  Show the meter on:  ")
+        out_lbl.setObjectName("outlbl")
+        bottom.addWidget(out_lbl)
+        self.out_bar = ReorderBar("outputs")
+        for key, w in (("mini", self.mini_btn), ("web", self.web_btn), ("ndi", self.ndi_btn)):
+            self.out_bar.add(key, w)
+        bottom.addWidget(self.out_bar)
+        self.outputs_bar = bottom
         self.cal_lbl = QtWidgets.QLabel()
         self.status = self.statusBar()
         self.status.addPermanentWidget(self.cal_lbl)
@@ -4123,14 +4617,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rta_panel = RtaPanel(self)
         self.spectro_panel = SpectroPanel(self.rta_panel.spectro)
         self.dose_panel = DosePanel(self)
-        self.theater = TheaterPanel(self)
         self.session_panel = SessionPanel(self)
         self.pco_panel = PcoPanel(self)
         self.docks = {}
         for name, title, w, area in (("rta", "RTA · 1/3 octave", self.rta_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("spectro", "Spectrogram", self.spectro_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("dose", "Dosimeter · OSHA / NIOSH", self.dose_panel, QtCore.Qt.RightDockWidgetArea),
-                                     ("theater", "Theater calibration", self.theater, QtCore.Qt.RightDockWidgetArea),
                                      ("session", "Session · markers · alarms · export", self.session_panel,
                                       QtCore.Qt.BottomDockWidgetArea),
                                      ("pco", "Service · Planning Center Live", self.pco_panel,
@@ -4143,41 +4635,58 @@ class MainWindow(QtWidgets.QMainWindow):
             sc.setWidget(w)
             sc.setMinimumSize(200, 80)
             d.setWidget(sc)
-            d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetClosable
-                          | QtWidgets.QDockWidget.DockWidgetFloatable)
+            # no "float": panels always stay inside the main window
+            d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetClosable)
             self.addDockWidget(area, d)
             self.docks[name] = d
         self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Vertical)
         self.splitDockWidget(self.docks["spectro"], self.docks["dose"], QtCore.Qt.Vertical)
-        self.tabifyDockWidget(self.docks["dose"], self.docks["theater"])
-        self.docks["dose"].raise_()
         self.splitDockWidget(self.docks["session"], self.docks["pco"], QtCore.Qt.Horizontal)
         if not self.cfg.get("dock_state"):
             QtCore.QTimer.singleShot(0, self.default_dock_sizes)
 
-        # second row: one button per tool (same as the View menu)
+        # second row: one button per panel (same as the View menu). Unlock 🔒 to drag them into a new order.
         self.addToolBarBreak()
         tools = QtWidgets.QToolBar("Tools"); tools.setObjectName("tools_bar"); tools.setMovable(False)
-        tools.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.addToolBar(tools)
         self.tool_actions = {}
-        for name, short in (("rta", "RTA 1/3 oct"), ("spectro", "Spectrogram"), ("dose", "Dosimeter"),
-                            ("theater", "Theater cal"), ("session", "Session"), ("pco", "Planning Center")):
+        self.tool_bar = ReorderBar("tools")
+        for name, short in (("rta", "RTA 1/3 oct"), ("div_rta", None), ("spectro", "Spectrogram"),
+                            ("dose", "Dosimeter"), ("session", "Session"), ("pco", "Planning Center"),
+                            ("div_view", None)):
+            if short is None:
+                self.tool_bar.divider(name)
+                continue
             d = self.docks[name]
-            a = QtGui.QAction(short, self); a.setCheckable(True)
-            a.setToolTip(f"Show or hide the {d.windowTitle()} panel")
+            btn = QtWidgets.QPushButton(short); btn.setCheckable(True); btn.setObjectName("panelbtn")
+            btn.setToolTip(f"Show or hide the {d.windowTitle()} panel")
             tva = d.toggleViewAction()
-            a.setChecked(tva.isChecked())
-            tva.toggled.connect(a.setChecked)
-            a.triggered.connect(lambda on, d=d: (d.show(), d.raise_()) if on else d.hide())
-            tools.addAction(a)
-            self.tool_actions[name] = a
-        tools.addSeparator()
-        tools.addAction("Show all", lambda: [d.show() for d in self.docks.values()])
-        tools.addAction("¼ screen", self.quarter_size).setToolTip("Shrink the window to a quarter of the screen")
-        tools.addAction("Fit", lambda: (self.resize(10_000, 10_000), self.fit_to_screen())).setToolTip(
-            "Fill the screen without going past its edges")
+            btn.setChecked(tva.isChecked())
+            tva.toggled.connect(btn.setChecked)
+            btn.clicked.connect(lambda on, d=d: (d.show(), d.raise_()) if on else d.hide())
+            self.tool_bar.add(name, btn)
+            self.tool_actions[name] = btn
+        for key, text, tip, fn in (
+                ("show_all", "Show all", "Show every panel", lambda: [d.show() for d in self.docks.values()]),
+                ("quarter", "¼ screen", "Shrink the window to a quarter of the screen", self.quarter_size),
+                ("fit", "Fit", "Fill the screen without going past its edges",
+                 lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))):
+            b = QtWidgets.QPushButton(text); b.setToolTip(tip); b.clicked.connect(fn)
+            self.tool_bar.add(key, b)
+        tools.addWidget(self.tool_bar)
+        spacer = QtWidgets.QWidget(); spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        tools.addWidget(spacer)
+        self.lock_btn = QtWidgets.QPushButton(); self.lock_btn.setCheckable(True)
+        self.lock_btn.setObjectName("lockbtn")
+        self.lock_btn.clicked.connect(lambda on: self.set_bars_locked(not on))
+        tools.addWidget(self.lock_btn)
         self.tools_bar = tools
+        self.bars = (self.top_bar, self.tool_bar, self.out_bar)
+        order = self.cfg.get("bar_order") or {}
+        for bar in self.bars:
+            bar.apply_order(order.get(bar.name))
+            bar.changed.connect(lambda keys, bar=bar: self.save_bar_order(bar, keys))
+        self.set_bars_locked(True)
 
         mb = self.menuBar()
         fm = mb.addMenu("&File")
@@ -4195,11 +4704,20 @@ class MainWindow(QtWidgets.QMainWindow):
         vm.addSeparator()
         vm.addAction("Show all panels", lambda: [d.show() for d in self.docks.values()])
         vm.addAction("Hide all panels", lambda: [d.hide() for d in self.docks.values()])
+        vm.addSeparator()
         vm.addAction("Mini meter", self.enter_mini)
+        self.web_act = vm.addAction("Web view", lambda: self.web_btn.click())
+        self.ndi_act = vm.addAction("NDI output", lambda: self.ndi_btn.click())
+        vm.addSeparator()
+        self.lock_act = vm.addAction("Lock toolbar buttons", lambda: self.lock_btn.click())
+        self.lock_act.setCheckable(True); self.lock_act.setChecked(True)
+        vm.addAction("Reset toolbar button order", self.reset_bar_order)
+        vm.addSeparator()
         vm.addAction("Quarter-screen size", self.quarter_size)
         vm.addAction("Fit to screen", lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))
         tm = mb.addMenu("&Tools")
         tm.addAction("Calibration wizard…", self.calibrate)
+        tm.addAction("Calibrate with pink noise from my speakers…", self.calibrate_pink)
         tm.addAction("Drop marker", lambda: self.add_marker(), QtGui.QKeySequence("M"))
         tm.addAction("Marker with note…", self.add_marker_note, QtGui.QKeySequence("Shift+M"))
         tm.addAction("Reset Leq / Max / Peak", self.reset_stats)
@@ -4209,7 +4727,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hm = mb.addMenu("&Help")
         hm.addAction("Guide…", lambda: self.guide())
         hm.addAction("Room EQ helper…", lambda: self.guide("Room EQ"))
-        hm.addAction("Theater calibration help", lambda: self.guide("Theater calibration"))
+        hm.addAction("Calibrate with pink noise from my speakers…", self.calibrate_pink)
         hm.addSeparator()
         about = hm.addAction(f"About {APP_NAME}", self.about)
         about.setMenuRole(QtGui.QAction.AboutRole)
@@ -4228,6 +4746,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.restoreState(QtCore.QByteArray(base64.b64decode(self.cfg["dock_state"])))
         except Exception:
             self.resize(int(scr.width() * 0.85), int(scr.height() * 0.85))
+        for d in self.docks.values():          # panels that were floating in 2.0 come back inside the window
+            if d.isFloating():
+                d.setFloating(False)
         self.fit_to_screen()
 
     def default_dock_sizes(self):
@@ -4374,7 +4895,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.run_btn.setText("■  Stop")
             except Exception as e:
                 self.run_btn.setChecked(False)
-                QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not open input:\n{e}")
+                message(self, "error", APP_NAME, f"Could not open input:\n{e}")
         else:
             self.stop()
             self.run_btn.setText("▶  Start")
@@ -4396,8 +4917,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if dev in ("sim", "simcal"):
             fs = 48000
             self.sim = SimSource(fs, "cal" if dev == "simcal" else "pink")
-            if self.theater.player.playing and self.theater.out.currentData() is None:
-                self.sim.inject = self.theater.player
+            if self.noise_player.playing and getattr(self.noise_player, "owner", None) is not None \
+                    and self.noise_player.owner.out.currentData() is None:
+                self.sim.inject = self.noise_player
         else:
             info = sd.query_devices(dev)
             if ch > info["max_input_channels"]:
@@ -4448,11 +4970,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_event("Meter stats reset")
 
     def calibrate(self):
-        CalWizard(self).exec()
+        exec_in_window(CalWizard(self))
+
+    def calibrate_pink(self):
+        w = CalWizard(self)
+        w.m_ref.setChecked(True)
+        exec_in_window(w)
+
+    # ---------- reorderable toolbar buttons
+    def set_bars_locked(self, locked):
+        for bar in self.bars:
+            bar.set_locked(locked)
+        self.lock_btn.blockSignals(True); self.lock_btn.setChecked(not locked); self.lock_btn.blockSignals(False)
+        self.lock_btn.setText("🔒 Locked" if locked else "🔓 Drag to reorder")
+        self.lock_btn.setToolTip("Buttons are locked. Click to unlock, then drag buttons into a new order."
+                                 if locked else "Drag any button (or divider) to move it. Click to lock again.")
+        if hasattr(self, "lock_act"):
+            self.lock_act.setChecked(locked)
+        if locked:
+            self.status.showMessage("Toolbar buttons locked", 2500)
+        else:
+            self.status.showMessage("Unlocked: drag buttons to reorder them, then click 🔓 to lock", 6000)
+
+    def save_bar_order(self, bar, keys):
+        self.cfg.setdefault("bar_order", {})[bar.name] = keys
+        self.save_cfg()
+
+    def reset_bar_order(self):
+        self.cfg["bar_order"] = {}
+        for bar in self.bars:
+            bar.apply_order(list(bar.items))
+        self.save_cfg()
 
     def settings(self):
         d = SettingsDialog(self.cfg, self)
-        if d.exec():
+        if exec_in_window(d):
             d.apply(self.cfg)
             if self.engine:
                 self.engine.long_min = self.cfg["long_leq_min"]
@@ -4483,13 +5035,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(f"Marker {n} dropped", 3000)
 
     def add_marker_note(self):
-        txt, ok = QtWidgets.QInputDialog.getText(self, "Marker", "Note for this marker:")
+        txt, ok = get_text(self, "Marker", "Note for this marker:")
         if ok:
             self.add_marker(txt.strip() or None)
 
     def new_session(self, confirm=True):
         if confirm and len(self.session) > 60:
-            r = QtWidgets.QMessageBox.question(self, APP_NAME, "Start a new session? The current history is cleared "
+            r = ask_box(self, APP_NAME, "Start a new session? The current history is cleared "
                                                "(export it first if you need it).")
             if r != QtWidgets.QMessageBox.Yes:
                 return
@@ -4509,18 +5061,18 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setIconPixmap(app_icon().pixmap(96, 96))
         box.setText(
             f"<h2>{APP_NAME} {APP_VERSION}</h2>"
-            "<p>Sound level meter for services, shows and theaters: Leq, RTA, dosimetry, theater calibration, "
+            "<p>Sound level meter for services, shows and theaters: Leq, RTA, dosimetry, pink-noise calibration, "
             "logging and reports, Planning Center, Companion and NDI.</p>"
             "<p>A/C weighting and Fast/Slow per IEC 61672-1 · 1/3 octaves per IEC 61260.</p>"
             "<p>Built with Python, Qt (PySide6), NumPy, SciPy and PortAudio. NDI® is a registered trademark of Vizrt NDI AB.</p>")
-        box.exec()
+        exec_in_window(box)
 
     def guide(self, page="Welcome"):
-        GuideWizard(self, page).exec()
+        exec_in_window(GuideWizard(self, page))
 
     def edit_schedule(self):
         d = ScheduleDialog(self.cfg, self)
-        if d.exec():
+        if exec_in_window(d):
             d.apply()
             self.save_cfg()
 
@@ -4544,7 +5096,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def export_csv(self, path=None):
         if not len(self.session):
             if path is None:
-                QtWidgets.QMessageBox.information(self, APP_NAME, "Nothing recorded yet: press Start first.")
+                message(self, "info", APP_NAME, "Nothing recorded yet: press Start first.")
             return
         os.makedirs(self.out_dir(), exist_ok=True)
         if path is None:
@@ -4591,7 +5143,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def export_pdf(self, path=None):
         if not len(self.session):
             if path is None:
-                QtWidgets.QMessageBox.information(self, APP_NAME, "Nothing recorded yet: press Start first.")
+                message(self, "info", APP_NAME, "Nothing recorded yet: press Start first.")
             return
         os.makedirs(self.out_dir(), exist_ok=True)
         interactive = path is None
@@ -4609,7 +5161,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
         except Exception as e:
             if interactive:
-                QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not write the report:\n{e}")
+                message(self, "error", APP_NAME, f"Could not write the report:\n{e}")
             else:
                 self.add_event(f"Auto-save of the report failed: {e}")
         return path
@@ -4642,10 +5194,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.pending = []
                 self.pending_notes = []
                 self.log_path = path
+                self.log_started = time.time()
                 self.log_btn.setText("●  Logging")
             except Exception as e:
                 self.log_btn.setChecked(False)
-                QtWidgets.QMessageBox.critical(self, APP_NAME, f"Could not start log:\n{e}")
+                message(self, "error", APP_NAME, f"Could not start log:\n{e}")
         else:
             if self.log_file:
                 self.log_file.close()
@@ -4674,15 +5227,36 @@ class MainWindow(QtWidgets.QMainWindow):
             if entry.get("report", True):
                 self.new_session(confirm=False)
             self.sched_key = active
-            self.add_event(f"Scheduled logging started ({entry['start']}–{entry['stop']})")
+            self.add_event(f"Scheduled logging started ({ampm(entry['start'])} – {ampm(entry['stop'])})")
             self.log_btn.click()
         elif self.sched_key and active != self.sched_key:
             self.add_event("Scheduled logging stopped")
             self._sched_stopping = True
+            had_log = self.log_writer is not None
+            rows, path = self.log_rows, getattr(self, "log_path", "")
+            started = getattr(self, "log_started", None)
             if self.log_writer:
                 self.log_btn.click()
             self._sched_stopping = False
             self.sched_key = None
+            if had_log:
+                self.show_logging_complete(rows, path, started)
+
+    def show_logging_complete(self, rows=0, path="", started=None):
+        """The 'Logging Complete' animation (end of a scheduled logging window)."""
+        lines = []
+        if started:
+            lines.append(f"Logged {hms(time.time() - started)}  ·  {rows} rows")
+            e = self.engine
+            if e is not None:
+                lv = e.leq_total("A")
+                if np.isfinite(lv):
+                    lines.append(f"LAeq since reset {lv:.1f} dB")
+        if path:
+            lines.append(f"Saved to {os.path.basename(path)}")
+        if self.cfg["autosave_dir"] and self.cfg["autosave_reports"]:
+            lines.append("Report auto-saved")
+        self._done_anim = LoggingComplete(self, lines)
 
     def write_log(self):
         """Every N seconds write one row: Leq / max / peak / Ln over that interval, plus markers."""
@@ -4714,7 +5288,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 self.ndi = None
                 self.ndi_btn.setChecked(False)
-                QtWidgets.QMessageBox.warning(self, APP_NAME, str(e))
+                message(self, "warn", APP_NAME, str(e))
                 return
             self.ndi_btn.setText("NDI ✓")
             self.ndi_timer.start(33)
@@ -4788,7 +5362,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.web = WebView(self.cfg["web_port"])
             except OSError as e:
                 self.web_btn.setChecked(False)
-                QtWidgets.QMessageBox.critical(self, APP_NAME,
+                message(self, "error", APP_NAME,
                     f"Could not start web view on port {self.cfg['web_port']}:\n{e}\n\nTry another port in Settings.")
                 return
             urls = self.web.urls()
@@ -4799,7 +5373,7 @@ class MainWindow(QtWidgets.QMainWindow):
             box.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             box.setText("On the other computer (e.g. the Proton), open a browser to:\n\n" + "\n".join(urls) +
                         "\n\nIf there's more than one address, use the one on the same network as that computer.")
-            box.exec()
+            exec_in_window(box)
         else:
             if self.web:
                 self.web.stop()
@@ -4909,7 +5483,6 @@ class MainWindow(QtWidgets.QMainWindow):
         m.bar.setLevel(main)
         m.history.add(main, self.last_1m)
         self.rta_panel.tick(e)
-        self.theater.tick(e)
         if new:
             r = new[-1]
             n_s, lw = len(e.hist_n), self.cfg["long_leq_min"]
@@ -4936,7 +5509,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev):
         self.stop()
-        self.theater.player.stop()
+        self.noise_player.stop()
         self.toggle_ndi(False)
         if self.web:
             self.web.stop()
@@ -5240,7 +5813,23 @@ def app_icon():
     return QtGui.QIcon(pm)
 
 
+def check_https():
+    """Build check: can the packaged app open an HTTPS connection to Planning Center? (401 = TLS works)."""
+    try:
+        urllib.request.urlopen(PcoClient.BASE, timeout=15, context=https_context())
+        print("HTTPS OK")
+        return 0
+    except urllib.error.HTTPError as e:
+        print(f"HTTPS OK (HTTP {e.code})")
+        return 0
+    except Exception as e:
+        print(f"HTTPS FAILED: {e}")
+        return 1
+
+
 def main():
+    if "--check-https" in sys.argv:
+        sys.exit(check_https())
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication(sys.argv)
@@ -5249,7 +5838,9 @@ def main():
     app.setWindowIcon(app_icon())
     install_combo_fixer(app)
     app.setQuitOnLastWindowClosed(False)    # mini meter / menu bar keep running while the window is hidden
+    global HOST
     w = MainWindow()
+    HOST = w
     w.show()
     sys.exit(app.exec())
 
