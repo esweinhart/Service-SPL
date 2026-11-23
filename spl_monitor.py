@@ -5516,7 +5516,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_fit_w", None) == w:
             return
         self._fit_w = w
-        pad = 14 + 2 * self.style().pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
+        st = self.style()          # toolbar margins differ per platform (macOS adds more): leave a little slack
+        pad = 20 + 2 * (st.pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
+                        + st.pixelMetric(QtWidgets.QStyle.PM_ToolBarFrameWidth)) \
+            + st.pixelMetric(QtWidgets.QStyle.PM_ToolBarItemSpacing)
         self.top_bar.set_avail(w - pad)
         self.tool_bar.set_avail(w - pad)
         self.out_lbl_act.setVisible(w >= 640)      # narrow window: drop the label, keep the buttons
@@ -5530,10 +5533,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def resizeEvent(self, ev):
         self.fit_bars()
         super().resizeEvent(ev)
+        self.refit_later()
+
+    def refit_later(self, *delays):
+        """Re-wrap the toolbars once the window has really settled. On macOS a resize from code (¼ screen, Fit)
+        lands in steps, and the toolbars could keep the old layout until the next manual resize."""
+        for ms in (delays or (0,)):
+            QtCore.QTimer.singleShot(ms, self.refit)
+
+    def refit(self):
+        self._fit_w = None
+        self.fit_bars()
+        for bar in self.bars:
+            bar.updateGeometry()
+        for tb in self.findChildren(QtWidgets.QToolBar):
+            tb.updateGeometry()
+            if tb.layout() is not None:
+                tb.layout().invalidate()
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
 
     def showEvent(self, ev):
         self._fit_w = None
         self.fit_bars()
+        self.refit_later(0, 250)
         super().showEvent(ev)
 
     SHORTCUTS = [
@@ -5618,6 +5643,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.restoreState(QtCore.QByteArray(base64.b64decode(self.cfg["dock_state"])))
         except Exception:
             self.resize(int(scr.width() * 0.85), int(scr.height() * 0.85))
+        # toolbars always on their own rows, whatever an older saved layout says
+        main_tb = self.findChild(QtWidgets.QToolBar, "toolbar")
+        self.addToolBar(QtCore.Qt.TopToolBarArea, main_tb)
+        self.addToolBarBreak(QtCore.Qt.TopToolBarArea)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, self.tools_bar)
+        self.addToolBar(QtCore.Qt.BottomToolBarArea, self.outputs_bar)
         for d in self.docks.values():          # panels that were floating in 2.0 come back inside the window
             if d.isFloating():
                 d.setFloating(False)
@@ -5640,6 +5671,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.showNormal()
         self.resize(scr.width() // 2, scr.height() // 2)
         self.move(scr.right() - self.frameGeometry().width() + 1, scr.top())
+        self.refit_later(0, 150, 400)
 
     def fit_to_screen(self):
         """Never open taller or wider than the screen (e.g. after moving from a bigger display)."""
@@ -5652,6 +5684,7 @@ class MainWindow(QtWidgets.QMainWindow):
         x = min(max(g.left(), scr.left()), scr.right() - g.width() + 1)
         y = min(max(g.top(), scr.top()), scr.bottom() - g.height() + 1)
         self.move(x, y)
+        self.refit_later(0, 150, 400)
 
     def refresh_profiles(self):
         self.prof_cb.blockSignals(True)
