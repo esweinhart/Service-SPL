@@ -4992,6 +4992,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tool_actions[name] = btn
         for key, text, tip, fn in (
                 ("show_all", "Show all", "Show every docked panel", lambda: [d.show() for d in self.docked()]),
+                ("session_only", "Session only", "Hide the other panels and give the Session panel the room",
+                 self.session_only),
                 ("quarter", "¼ screen", "Shrink the window to a quarter of the screen", self.quarter_size),
                 ("fit", "Fit", "Fill the screen without going past its edges",
                  lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))):
@@ -5030,6 +5032,7 @@ class MainWindow(QtWidgets.QMainWindow):
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
         vm.addAction("Show all panels", lambda: [d.show() for d in self.docked()])
+        vm.addAction("Session only", self.session_only)
         vm.addAction("Hide all panels", lambda: [d.hide() for d in self.docks.values()])
         vm.addSeparator()
         vm.addAction("Mini meter", self.enter_mini)
@@ -5082,6 +5085,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_w = None
         self.fit_bars()
         super().showEvent(ev)
+
+    def session_only(self):
+        """Just the big meter and the Session panel (graph, markers, alarms, export)."""
+        for k, d in self.docks.items():
+            if k != "session":
+                d.hide()
+        s = self.docks["session"]
+        s.show(); s.raise_()
+        QtCore.QTimer.singleShot(0, lambda: self.resizeDocks([s], [int(self.height() * 0.55)], QtCore.Qt.Vertical))
 
     def docked(self):
         return [d for d in self.docks.values() if isinstance(d, QtWidgets.QDockWidget)]
