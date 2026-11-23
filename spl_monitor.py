@@ -4212,11 +4212,21 @@ WEB_PAGE = """<!DOCTYPE html>
 <style>
 html,body{margin:0;height:100%;background:#121417;color:#e8e8e8;
   font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;overflow:hidden}
-#wrap{display:flex;align-items:center;height:100%;padding:0 3vw;gap:3vw;box-sizing:border-box}
-#thumb{height:min(70vh,28vw);flex:none}
-#right{flex:1;text-align:right}
-#val{font-family:Consolas,Menlo,monospace;font-weight:700;font-size:min(55vh,16vw);line-height:1;white-space:nowrap}
-#sub{color:#8a9099;font-size:min(9vh,2.4vw);white-space:nowrap}
+/* thumb and number sit together in the middle and scale with the window (any width or height) */
+#wrap{display:flex;align-items:center;justify-content:center;height:100%;padding:0 2vw;
+  gap:min(2vw,3vh);box-sizing:border-box}
+#thumb{height:min(70vh,26vw);flex:none}
+#right{flex:none;text-align:left;min-width:0}
+#val{font-family:Consolas,Menlo,monospace;font-weight:700;font-size:min(55vh,19vw);line-height:1;white-space:nowrap}
+#sub{color:#8a9099;font-size:min(9vh,3vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* tall and skinny: thumb on top of the number */
+@media (max-aspect-ratio:4/5){
+ #wrap{flex-direction:column;gap:2vh}
+ #thumb{height:min(40vh,45vw)}
+ #right{text-align:center}
+ #val{font-size:min(30vh,24vw)}
+ #sub{font-size:min(5vh,5vw)}
+}
 </style></head><body>
 <div id="wrap"><div id="thumb"></div><div id="right"><div id="val">--.-</div><div id="sub">connecting…</div></div></div>
 <script>
