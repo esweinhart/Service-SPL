@@ -644,6 +644,10 @@ def style_sheet():
     return f"""
 QWidget {{ background:{T['bg']}; color:{T['fg']}; font-family:'Segoe UI','Helvetica Neue',Arial; font-size:10pt; }}
 QFrame#tile {{ background:{T['panel']}; border:1px solid {T['border']}; border-radius:6px; }}
+QMainWindow::separator {{ background:{T['bg']}; width:7px; height:7px; }}
+QMainWindow::separator:hover {{ background:{T['accent']}; }}
+QSplitter::handle {{ background:{T['bg']}; }}
+QSplitter::handle:hover {{ background:{T['accent']}; }}
 QFrame#tile QLabel {{ background:transparent; }}
 QPushButton, QToolButton {{ background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:4px; padding:5px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background:{T['hover']}; }}
@@ -1186,6 +1190,8 @@ class FlowLayout(QtWidgets.QLayout):
             if it.isEmpty():
                 continue
             sz = it.sizeHint()
+            if sz.width() > r.width():          # wider than the whole row (long combo text): squeeze it to fit
+                sz = QtCore.QSize(max(r.width(), it.minimumSize().width()), sz.height())
             if row and x + sz.width() > r.right() + 1:
                 place(row, y, row_h)
                 y += row_h + self._sp
@@ -1195,6 +1201,27 @@ class FlowLayout(QtWidgets.QLayout):
             row_h = max(row_h, sz.height())
         place(row, y, row_h)
         return y + row_h - rect.y() + m.bottom()
+
+
+def flow_row(*widgets, spacing=6):
+    """A row of widgets that wraps onto more lines in a narrow panel instead of getting cut off."""
+    holder = QtWidgets.QWidget()
+    fl = FlowLayout(holder, spacing)
+    fl.setContentsMargins(0, 0, 0, 0)
+    for w in widgets:
+        fl.addWidget(w)
+    holder.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+    sp = holder.sizePolicy(); sp.setHeightForWidth(True); holder.setSizePolicy(sp)
+    return holder
+
+
+def h_group(*widgets, spacing=4):
+    """Keep a label + control (+ tip) together as one unit inside a flow_row."""
+    g = QtWidgets.QWidget()
+    h = QtWidgets.QHBoxLayout(g); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(spacing)
+    for w in widgets:
+        h.addWidget(w)
+    return g
 
 
 class ReorderBar(QtWidgets.QWidget):
@@ -2095,10 +2122,10 @@ class RtaPanel(QtWidgets.QWidget):
         rst.clicked.connect(self.reset)
         for w in (self.w, self.sp):
             w.setMinimumWidth(70)
-        for lab, wdg, key in (("Weighting", self.w, "Weighting"), ("Speed", self.sp, "RTA speed")):
-            row.addWidget(QtWidgets.QLabel(lab)); row.addWidget(wdg); row.addWidget(InfoTip(GLOSSARY[key]))
-            row.addSpacing(6)
-        row.addWidget(rst); row.addStretch(); row.addWidget(InfoTip(GLOSSARY["RTA"]))
+        groups = [h_group(QtWidgets.QLabel(lab), wdg, InfoTip(GLOSSARY[key]))
+                  for lab, wdg, key in (("Weighting", self.w, "Weighting"), ("Speed", self.sp, "RTA speed"))]
+        row.addWidget(flow_row(*groups, rst, spacing=10), 1)
+        row.addWidget(InfoTip(GLOSSARY["RTA"]), 0, QtCore.Qt.AlignTop)
         v.addLayout(row)
         self.rta = RtaWidget()
         v.addWidget(self.rta, 1)
@@ -2267,7 +2294,6 @@ class SessionPanel(QtWidgets.QWidget):
         c = main.cfg
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
-        top = QtWidgets.QHBoxLayout()
         self.info = QtWidgets.QLabel("")
         self.view = QtWidgets.QComboBox()
         self.views = {"Last 10 min": 600, "Last hour": 3600, "Last 4 hours": 14400, "Whole session": 0}
@@ -2281,10 +2307,7 @@ class SessionPanel(QtWidgets.QWidget):
         epdf = QtWidgets.QPushButton("PDF report…"); epdf.clicked.connect(lambda: main.export_pdf())
         sch = QtWidgets.QPushButton("Schedule…"); sch.setToolTip("Start and stop logging by time (e.g. every Sunday)")
         sch.clicked.connect(lambda: main.edit_schedule())
-        top.addWidget(self.info, 1)
-        for w in (self.view, mk, new, ecsv, epdf, sch):
-            top.addWidget(w)
-        v.addLayout(top)
+        v.addWidget(flow_row(self.info, self.view, mk, new, ecsv, epdf, sch))
         meta = QtWidgets.QHBoxLayout()
         self.venue = QtWidgets.QLineEdit(c["venue"]); self.venue.setPlaceholderText("Venue / show / room")
         self.oper = QtWidgets.QLineEdit(c["operator"]); self.oper.setPlaceholderText("Operator")
@@ -2292,10 +2315,13 @@ class SessionPanel(QtWidgets.QWidget):
         self.oper.textChanged.connect(lambda s: c.__setitem__("operator", s))
         meta.addWidget(self.venue, 2); meta.addWidget(self.oper, 1)
         v.addLayout(meta)
-        split = QtWidgets.QHBoxLayout()
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)   # drag the line between graph and markers/alarms
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(7)
         self.graph = SessionGraph(main)
-        split.addWidget(self.graph, 3)
-        side = QtWidgets.QVBoxLayout()
+        split.addWidget(self.graph)
+        side_w = QtWidgets.QWidget()
+        side = QtWidgets.QVBoxLayout(side_w); side.setContentsMargins(0, 0, 0, 0)
         side.addWidget(QtWidgets.QLabel("Markers & events"))
         self.events = QtWidgets.QListWidget()
         side.addWidget(self.events, 1)
@@ -2303,7 +2329,11 @@ class SessionPanel(QtWidgets.QWidget):
         self.rules = QtWidgets.QTableWidget(0, 3)
         self.rules.setHorizontalHeaderLabels(["On", "Metric", "≥ dB / %"])
         self.rules.verticalHeader().setVisible(False)
-        self.rules.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hh = self.rules.horizontalHeader()
+        hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        hh.setMinimumSectionSize(30)
         side.addWidget(self.rules, 1)
         rb = QtWidgets.QHBoxLayout()
         add = QtWidgets.QPushButton("+"); add.clicked.connect(self.add_rule)
@@ -2312,9 +2342,22 @@ class SessionPanel(QtWidgets.QWidget):
         self.beep.toggled.connect(lambda on: c.__setitem__("alarm_beep", on))
         rb.addWidget(add); rb.addWidget(rem); rb.addStretch(); rb.addWidget(self.beep)
         side.addLayout(rb)
-        split.addLayout(side, 2)
-        v.addLayout(split, 1)
+        split.addWidget(side_w)
+        split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
+        sizes = main.cfg.get("session_split")
+        if sizes:
+            split.setSizes(sizes)
+        split.splitterMoved.connect(lambda *_: main.cfg.__setitem__("session_split", split.sizes()))
+        v.addWidget(split, 1)
+        self.split = split
         self.load_rules()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # narrow panel: put the markers / alarms under the graph instead of beside it
+        o = QtCore.Qt.Vertical if self.width() < 620 else QtCore.Qt.Horizontal
+        if self.split.orientation() != o:
+            self.split.setOrientation(o)
 
     def _view(self, t):
         self.main.cfg["session_view"] = self.views[t]
@@ -2327,7 +2370,7 @@ class SessionPanel(QtWidgets.QWidget):
         for i, r in enumerate(rs):
             cb = QtWidgets.QCheckBox(); cb.setChecked(r["on"])
             cb.toggled.connect(self.save_rules)
-            cell = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(cell); h.setContentsMargins(6, 0, 0, 0)
+            cell = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(cell); h.setContentsMargins(8, 0, 8, 0)
             h.addWidget(cb)
             self.rules.setCellWidget(i, 0, cell)
             m = QtWidgets.QComboBox(); m.addItems(ALARM_METRICS); m.setCurrentText(r["metric"])
@@ -3992,7 +4035,6 @@ class PcoPanel(QtWidgets.QWidget):
         self.client = None
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(6, 6, 6, 6)
-        g = QtWidgets.QGridLayout()
         self.app_id = QtWidgets.QLineEdit(c["pco_app_id"]); self.app_id.setPlaceholderText("Application ID")
         self.secret = QtWidgets.QLineEdit(); self.secret.setEchoMode(QtWidgets.QLineEdit.Password)
         self.secret.setPlaceholderText("Secret")
@@ -4014,12 +4056,16 @@ class PcoPanel(QtWidgets.QWidget):
         self.target = QtWidgets.QDoubleSpinBox(); self.target.setRange(60, 130); self.target.setValue(c["pco_target"])
         self.target.setPrefix("Item target LAeq "); self.target.setSuffix(" dB")
         self.target.valueChanged.connect(lambda x: c.__setitem__("pco_target", x))
-        g.addWidget(self.app_id, 0, 0); g.addWidget(self.secret, 0, 1); g.addWidget(con, 0, 2)
-        g.addWidget(self.st, 1, 0); g.addWidget(self.plan, 1, 1); g.addWidget(self.follow, 1, 2)
-        g.addWidget(self.target, 2, 0)
-        hb = QtWidgets.QHBoxLayout(); hb.addWidget(self.show_secret); hb.addWidget(tok); hb.addWidget(hlp)
-        g.addLayout(hb, 2, 1, 1, 2)
-        v.addLayout(g)
+        for w in (self.app_id, self.secret):
+            w.setMinimumWidth(120)
+        self.app_id.sizeHint = lambda: QtCore.QSize(220, QtWidgets.QLineEdit.sizeHint(self.app_id).height())
+        self.secret.sizeHint = lambda: QtCore.QSize(220, QtWidgets.QLineEdit.sizeHint(self.secret).height())
+        for cb in (self.st, self.plan):
+            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(18)
+        v.addWidget(flow_row(self.app_id, self.secret, self.show_secret, con))
+        v.addWidget(flow_row(self.st, self.plan, self.follow))
+        v.addWidget(flow_row(self.target, tok, hlp))
         self.status = QtWidgets.QLabel("Not connected")
         self.now = QtWidgets.QLabel("—")
         self.now.setWordWrap(True)
