@@ -5394,6 +5394,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tool_bar.add(key, b)
         self.lock_btn = QtWidgets.QPushButton(); self.lock_btn.setCheckable(True)
         self.lock_btn.setObjectName("lockbtn")
+        self.lock_btn.setStyleSheet("QPushButton#lockbtn { padding:5px 9px; font-size:12pt; }")
         self.lock_btn.clicked.connect(lambda on: self.set_bars_locked(not on))
         self.tool_bar.set_tail(self.lock_btn)   # rides at the end of the row and wraps with the buttons
         tools.addWidget(self.tool_bar)
@@ -5809,9 +5810,11 @@ class MainWindow(QtWidgets.QMainWindow):
         for bar in self.bars:
             bar.set_locked(locked)
         self.lock_btn.blockSignals(True); self.lock_btn.setChecked(not locked); self.lock_btn.blockSignals(False)
-        self.lock_btn.setText("🔒 Locked" if locked else "🔓 Drag to reorder")
+        self.lock_btn.setText("🔒" if locked else "🔓")
         self.lock_btn.setToolTip("Buttons are locked. Click to unlock, then drag buttons into a new order."
-                                 if locked else "Drag any button (or divider) to move it. Click to lock again.")
+                                 if locked else "Unlocked: drag any button (or divider) to move it. Click to lock again.")
+        if not locked:
+            self.status.showMessage("Toolbar unlocked: drag buttons into a new order, then click 🔓 to lock.", 6000)
         if hasattr(self, "lock_act"):
             self.lock_act.setChecked(locked)
         if hasattr(self, "out_lbl"):          # the lock button changed width: re-wrap the toolbars
