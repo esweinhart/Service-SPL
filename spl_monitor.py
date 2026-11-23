@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -625,6 +625,18 @@ class SimSource:
         return [p * env]
 
 
+class TidyScroll(QtWidgets.QScrollArea):
+    """Scroll area that hides a scrollbar when the panel is squashed too small to show a usable one
+    (instead of a clipped stub in the corner)."""
+    MIN = 56
+
+    def resizeEvent(self, e):
+        on, off = QtCore.Qt.ScrollBarAsNeeded, QtCore.Qt.ScrollBarAlwaysOff
+        self.setVerticalScrollBarPolicy(on if e.size().height() >= self.MIN else off)
+        self.setHorizontalScrollBarPolicy(on if e.size().width() >= self.MIN else off)
+        super().resizeEvent(e)
+
+
 # --------------------------------------------------------------- theme ----
 
 PALETTES = {
@@ -651,6 +663,15 @@ QMainWindow::separator:hover {{ background:{T['accent']}; }}
 QSplitter::handle:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
 QSplitter::handle:vertical {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
 QSplitter::handle:hover {{ background:{T['accent']}; }}
+QScrollBar:vertical {{ background:{T['track']}; width:14px; margin:2px 1px; border:1px solid {T['border']}; border-radius:5px; }}
+QScrollBar:horizontal {{ background:{T['track']}; height:14px; margin:1px 2px; border:1px solid {T['border']}; border-radius:5px; }}
+QScrollBar::handle:vertical {{ background:{T['dim']}; min-height:28px; margin:1px 2px; border-radius:4px; }}
+QScrollBar::handle:horizontal {{ background:{T['dim']}; min-width:28px; margin:2px 1px; border-radius:4px; }}
+QScrollBar::handle:hover {{ background:{T['accent']}; }}
+QScrollBar::handle:pressed {{ background:{T['green']}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width:0; height:0; border:none; background:none; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background:none; }}
+QAbstractScrollArea::corner {{ background:{T['bg']}; border:none; }}
 QFrame#tile QLabel {{ background:transparent; }}
 QPushButton, QToolButton {{ background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:4px; padding:5px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background:{T['hover']}; }}
@@ -5474,7 +5495,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                       QtCore.Qt.BottomDockWidgetArea)):
             d = QtWidgets.QDockWidget(title, self)
             d.setObjectName("dock_" + name)
-            sc = QtWidgets.QScrollArea()          # panels scroll instead of forcing the window bigger
+            sc = TidyScroll()          # panels scroll instead of forcing the window bigger
             sc.setWidgetResizable(True)
             sc.setFrameShape(QtWidgets.QFrame.NoFrame)
             sc.setWidget(w)
