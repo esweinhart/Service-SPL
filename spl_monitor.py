@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
