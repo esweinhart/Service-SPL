@@ -4973,12 +4973,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addToolBar(tools)
         self.tool_actions = {}
         self.tool_bar = ReorderBar("tools")
+        self.pop_bar = ReorderBar("popups")     # pop-up cards: right side of the bottom bar
         for name, short in (("rta", "RTA 1/3 oct"), ("div_rta", None), ("spectro", "Spectrogram"),
-                            ("dose", "Dosimeter"), ("session", "Session"), ("pco", "Planning Center"),
-                            ("div_view", None)):
+                            ("session", "Session"), ("div_view", None), ("dose", "Dosimeter"),
+                            ("pco", "Planning Center")):
             if short is None:
                 self.tool_bar.divider(name)
                 continue
+            bar = self.pop_bar if name in ("dose", "pco") else self.tool_bar
             d = self.docks[name]
             btn = QtWidgets.QPushButton(short); btn.setCheckable(True); btn.setObjectName("panelbtn")
             btn.setToolTip(f"Show or hide the {d.windowTitle()} panel")
@@ -4986,10 +4988,10 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setChecked(tva.isChecked())
             tva.toggled.connect(btn.setChecked)
             btn.clicked.connect(lambda on, d=d: (d.show(), d.raise_()) if on else d.hide())
-            self.tool_bar.add(name, btn)
+            bar.add(name, btn)
             self.tool_actions[name] = btn
         for key, text, tip, fn in (
-                ("show_all", "Show all", "Show every panel", lambda: [d.show() for d in self.docks.values()]),
+                ("show_all", "Show all", "Show every docked panel", lambda: [d.show() for d in self.docked()]),
                 ("quarter", "¼ screen", "Shrink the window to a quarter of the screen", self.quarter_size),
                 ("fit", "Fit", "Fill the screen without going past its edges",
                  lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))):
@@ -5002,7 +5004,11 @@ class MainWindow(QtWidgets.QMainWindow):
         tools.addWidget(self.tool_bar)
         self.out_lbl = out_lbl
         self.tools_bar = tools
-        self.bars = (self.top_bar, self.tool_bar, self.out_bar)
+        bottom_spacer = QtWidgets.QWidget()
+        bottom_spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.outputs_bar.addWidget(bottom_spacer)
+        self.outputs_bar.addWidget(self.pop_bar)
+        self.bars = (self.top_bar, self.tool_bar, self.out_bar, self.pop_bar)
         order = self.cfg.get("bar_order") or {}
         for bar in self.bars:
             bar.apply_order(order.get(bar.name))
@@ -5023,7 +5029,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for d in self.docks.values():
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
-        vm.addAction("Show all panels", lambda: [d.show() for d in self.docks.values()])
+        vm.addAction("Show all panels", lambda: [d.show() for d in self.docked()])
         vm.addAction("Hide all panels", lambda: [d.hide() for d in self.docks.values()])
         vm.addSeparator()
         vm.addAction("Mini meter", self.enter_mini)
@@ -5064,7 +5070,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pad = 14 + 2 * self.style().pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
         self.top_bar.set_avail(w - pad)
         self.tool_bar.set_avail(w - pad)
-        self.out_bar.set_avail(w - pad - self.out_lbl.sizeHint().width())
+        rest = w - pad - self.out_lbl.sizeHint().width()
+        self.pop_bar.set_avail(max(rest // 2, rest - self.out_bar.lay.sizeHint().width() - 12))
+        self.out_bar.set_avail(rest - self.pop_bar.sizeHint().width() - 12)
 
     def resizeEvent(self, ev):
         self.fit_bars()
@@ -5074,6 +5082,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_w = None
         self.fit_bars()
         super().showEvent(ev)
+
+    def docked(self):
+        return [d for d in self.docks.values() if isinstance(d, QtWidgets.QDockWidget)]
 
     def restore_layout(self):
         scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
