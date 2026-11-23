@@ -60,7 +60,7 @@ DEFAULTS = dict(
     autosave_dir="", autosave_reports=True, schedule=[],
     pink_source="app", pink_target=85.0,
     pco_app_id="", pco_target=95.0, pco_service_type=None,
-    win_geom=None, dock_state=None, bar_order={},
+    win_geom=None, dock_state=None, bar_order={}, popups={},
 )
 
 # ---------------------------------------------------------------- DSP ----
@@ -4559,6 +4559,127 @@ def merge_cfg(saved):
 BACKUP_KIND = "ServiceSPL settings backup"
 
 
+class PopupPanel(QtWidgets.QFrame):
+    """A panel that floats as a card over the dashboard but never leaves the main window.
+    Drag its title bar to move it, the corner grip to resize, ✕ to close. Acts enough like a QDockWidget
+    (toggleViewAction, windowTitle, show/hide) to sit in MainWindow.docks."""
+    def __init__(self, title, widget, host, key, default_size=(460, 420)):
+        super().__init__(host)
+        self.host, self.key, self.default_size = host, key, default_size
+        self.setObjectName("popuppanel")
+        self.setWindowTitle(title)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        shadow = QtWidgets.QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36); shadow.setOffset(0, 6); shadow.setColor(QtGui.QColor(0, 0, 0, 150))
+        self.setGraphicsEffect(shadow)
+        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(10, 6, 10, 6); v.setSpacing(4)
+        head = QtWidgets.QWidget(); head.setObjectName("popuphead"); head.setCursor(QtCore.Qt.SizeAllCursor)
+        hl = QtWidgets.QHBoxLayout(head); hl.setContentsMargins(2, 0, 0, 0)
+        self.title = QtWidgets.QLabel(title)
+        x = QtWidgets.QToolButton(); x.setText("✕"); x.setAutoRaise(True); x.setToolTip("Close")
+        x.setCursor(QtCore.Qt.PointingHandCursor); x.clicked.connect(self.hide)
+        hl.addWidget(self.title, 1); hl.addWidget(x)
+        v.addWidget(head)
+        sc = QtWidgets.QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sc.setWidget(widget)
+        v.addWidget(sc, 1)
+        grip_row = QtWidgets.QHBoxLayout(); grip_row.setContentsMargins(0, 0, 0, 0)
+        grip_row.addStretch(); grip_row.addWidget(QtWidgets.QSizeGrip(self), 0, QtCore.Qt.AlignRight)
+        v.addLayout(grip_row)
+        self._head = head
+        head.installEventFilter(self)
+        self.title.installEventFilter(self)
+        self._drag = None
+        self._act = QtGui.QAction(title, self); self._act.setCheckable(True)
+        self._act.toggled.connect(lambda on: self.setVisible(on) if on != self.isVisible() else None)
+        host.installEventFilter(self)
+        self.setMinimumSize(220, 140)
+        self.refresh_theme()
+        self._placed = False
+        self.hide()
+        g = (host.cfg.get("popups") or {}).get(key)
+        if g and g.get("rect"):
+            self.setGeometry(*g["rect"])
+            self._placed = True
+
+    def refresh_theme(self):
+        self.setStyleSheet(f"QFrame#popuppanel {{ background:{T['bg']}; border:1px solid {T['btn_border']}; "
+                           "border-radius:10px; }"
+                           "QLabel { background:transparent; font-weight:700; }")
+
+    # dock-widget look-alikes
+    def toggleViewAction(self):
+        return self._act
+
+    def isFloating(self):
+        return False
+
+    def setFloating(self, _):
+        pass
+
+    def setVisible(self, on):
+        if on and not self._placed:
+            r = self.host.centralWidget().geometry() if self.host.centralWidget() else self.host.rect()
+            w, h = self.default_size
+            self.setGeometry(r.right() - w - 16, r.top() + 16, w, h)
+            self._placed = True
+        super().setVisible(on)
+        if on:
+            self.keep_inside()
+            self.raise_()
+        if self._act.isChecked() != on:
+            self._act.setChecked(on)
+        self.save()
+
+    def keep_inside(self):
+        """Stay fully inside the main window (shrink if the window got smaller)."""
+        r = self.host.rect().adjusted(4, 4, -4, -4)
+        g = self.geometry()
+        w, h = min(g.width(), r.width()), min(g.height(), r.height())
+        x = min(max(g.x(), r.left()), r.right() - w + 1)
+        y = min(max(g.y(), r.top()), r.bottom() - h + 1)
+        if (x, y, w, h) != (g.x(), g.y(), g.width(), g.height()):
+            self.setGeometry(x, y, w, h)
+
+    def save(self):
+        if self._placed:
+            g = self.geometry()
+            self.host.cfg.setdefault("popups", {})[self.key] = dict(rect=[g.x(), g.y(), g.width(), g.height()],
+                                                                     visible=self.isVisible())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.save()
+
+    def moveEvent(self, ev):
+        super().moveEvent(ev)
+        self.save()
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if obj is self.host:
+            if t == QtCore.QEvent.Resize and self.isVisible():
+                self.keep_inside()
+            return False
+        if t == QtCore.QEvent.MouseButtonPress and ev.button() == QtCore.Qt.LeftButton:
+            self._drag = ev.globalPosition().toPoint() - self.pos()
+            self.raise_()
+            return True
+        if t == QtCore.QEvent.MouseMove and self._drag is not None:
+            self.move(ev.globalPosition().toPoint() - self._drag)
+            self.keep_inside()
+            return True
+        if t == QtCore.QEvent.MouseButtonRelease and self._drag is not None:
+            self._drag = None
+            self.save()
+            return True
+        return False
+
+    def mousePressEvent(self, ev):
+        self.raise_()
+        super().mousePressEvent(ev)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -4734,7 +4855,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for t in self.meter.tiles():
             t.refresh_theme()
         self.meter.apply_style()
-        for w in (self.dose_panel, self.mini, self.pco_panel):
+        for w in (self.dose_panel, self.mini, self.pco_panel, self.docks["dose"], self.docks["pco"]):
             if w is not None:
                 w.refresh_theme()
         self.apply_cfg_to_ui()
@@ -4825,10 +4946,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.docks = {}
         for name, title, w, area in (("rta", "RTA · 1/3 octave", self.rta_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("spectro", "Spectrogram", self.spectro_panel, QtCore.Qt.RightDockWidgetArea),
-                                     ("dose", "Dosimeter · OSHA / NIOSH", self.dose_panel, QtCore.Qt.RightDockWidgetArea),
                                      ("session", "Session · markers · alarms · export", self.session_panel,
-                                      QtCore.Qt.BottomDockWidgetArea),
-                                     ("pco", "Service · Planning Center Live", self.pco_panel,
                                       QtCore.Qt.BottomDockWidgetArea)):
             d = QtWidgets.QDockWidget(title, self)
             d.setObjectName("dock_" + name)
@@ -4843,8 +4961,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.addDockWidget(area, d)
             self.docks[name] = d
         self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Vertical)
-        self.splitDockWidget(self.docks["spectro"], self.docks["dose"], QtCore.Qt.Vertical)
-        self.splitDockWidget(self.docks["session"], self.docks["pco"], QtCore.Qt.Horizontal)
+        # Dosimeter and Planning Center: pop-up cards that float over the dashboard, inside the window
+        self.docks["dose"] = PopupPanel("Dosimeter · OSHA / NIOSH", self.dose_panel, self, "dose", (420, 520))
+        self.docks["pco"] = PopupPanel("Service · Planning Center Live", self.pco_panel, self, "pco", (620, 480))
         if not self.cfg.get("dock_state"):
             QtCore.QTimer.singleShot(0, self.default_dock_sizes)
 
@@ -4971,14 +5090,17 @@ class MainWindow(QtWidgets.QMainWindow):
         for d in self.docks.values():          # panels that were floating in 2.0 come back inside the window
             if d.isFloating():
                 d.setFloating(False)
+        pops = self.cfg.get("popups") or {}
+        for key in ("dose", "pco"):              # pop-up cards come back the way you left them
+            if (pops.get(key) or {}).get("visible"):
+                QtCore.QTimer.singleShot(0, self.docks[key].show)
         self.fit_to_screen()
 
     def default_dock_sizes(self):
         w, h = self.width(), self.height()
         self.resizeDocks([self.docks["rta"]], [int(w * 0.32)], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["session"], self.docks["pco"]], [int(w * 0.62), int(w * 0.38)], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["rta"], self.docks["spectro"], self.docks["dose"]],
-                         [int(h * 0.36), int(h * 0.24), int(h * 0.34)], QtCore.Qt.Vertical)
+        self.resizeDocks([self.docks["rta"], self.docks["spectro"]],
+                         [int(h * 0.5), int(h * 0.4)], QtCore.Qt.Vertical)
         self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
 
     def quarter_size(self):
