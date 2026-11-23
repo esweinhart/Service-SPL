@@ -60,7 +60,7 @@ DEFAULTS = dict(
     autosave_dir="", autosave_reports=True, schedule=[],
     pink_source="app", pink_target=85.0,
     pco_app_id="", pco_target=95.0, pco_service_type=None,
-    win_geom=None, dock_state=None, bar_order={}, popups={},
+    win_geom=None, dock_state=None, bar_order={}, popups={}, vu_skin=False,
 )
 
 # ---------------------------------------------------------------- DSP ----
@@ -1024,9 +1024,9 @@ class LoggingComplete(QtWidgets.QWidget):
     DUR = 1600          # ms for the draw-in
     HOLD = 12000        # ms before it fades away by itself
 
-    def __init__(self, host, lines):
+    def __init__(self, host, lines, night=False):
         super().__init__(host)
-        self.host, self.lines = host, lines
+        self.host, self.lines, self.night = host, lines, night
         self.t = 0.0
         self.alpha = 1.0
         rng = np.random.default_rng()
@@ -1075,6 +1075,37 @@ class LoggingComplete(QtWidgets.QWidget):
         cx, cy = self.width() / 2, self.height() * 0.40
         R = max(40.0, min(self.width(), self.height()) * 0.14)
         green = QtGui.QColor(T["green"])
+        if self.night:                     # after-midnight wrap: a moon rises instead of the check mark
+            self._paint_moon(p, cx, cy, R, ease)
+        else:
+            self._paint_check(p, cx, cy, R, ease, green)
+        self._paint_tail(p, cx, cy, R, ease)
+
+    def _paint_moon(self, p, cx, cy, R, ease):
+        rise = ease(self.t / 0.55)
+        y = cy + (1 - rise) * R * 0.8
+        glow = QtGui.QRadialGradient(QtCore.QPointF(cx, y), R * 1.8)
+        glow.setColorAt(0, QtGui.QColor(255, 220, 140, int(90 * rise))); glow.setColorAt(1, QtGui.QColor(255, 220, 140, 0))
+        p.setPen(QtCore.Qt.NoPen); p.setBrush(glow)
+        p.drawEllipse(QtCore.QPointF(cx, y), R * 1.8, R * 1.8)
+        disc = QtGui.QPainterPath(); disc.addEllipse(QtCore.QPointF(cx, y), R, R)
+        bite = QtGui.QPainterPath(); bite.addEllipse(QtCore.QPointF(cx + R * 0.55, y - R * 0.25), R * 0.9, R * 0.9)
+        c = QtGui.QColor("#f4d27a"); c.setAlpha(int(255 * rise))
+        p.setBrush(c)
+        p.drawPath(disc.subtracted(bite))
+        # a little "zz" drifting up once the moon is out
+        z = ease((self.t - 0.5) / 0.5)
+        if z > 0:
+            f = QtGui.QFont(self.font()); f.setBold(True)
+            for i, (dx, dy, sz) in enumerate(((1.15, -0.55, 0.30), (1.45, -0.95, 0.22), (1.7, -1.3, 0.16))):
+                a = min(1.0, max(0.0, z * 3 - i))
+                if a <= 0:
+                    continue
+                f.setPointSizeF(max(8.0, R * sz)); p.setFont(f)
+                p.setPen(QtGui.QColor(220, 228, 240, int(220 * a)))
+                p.drawText(QtCore.QPointF(cx + R * dx * 0.7, y + R * dy * (0.7 + 0.3 * z)), "z")
+
+    def _paint_check(self, p, cx, cy, R, ease, green):
         # 1. ring sweeps around (0 - 45 %)
         ring = ease(self.t / 0.45)
         pen = QtGui.QPen(green, R * 0.12, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap)
@@ -1102,13 +1133,17 @@ class LoggingComplete(QtWidgets.QWidget):
                                 QtCore.Qt.RoundJoin))
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPath(path)
-        # 3. sparks burst outwards (60 - 100 %)
+
+    def _paint_tail(self, p, cx, cy, R, ease):
+        # 3. sparks (or, at night, stars) burst outwards (60 - 100 %)
         burst = (self.t - 0.6) / 0.4
         if 0 < burst <= 1:
             p.setPen(QtCore.Qt.NoPen)
             for ang, spd, size in self.sparks:
                 dist = R * (1.1 + 1.3 * spd * ease(burst))
-                c = QtGui.QColor(T["yellow"] if size > 4.5 else T["green"]); c.setAlpha(int(255 * (1 - burst)))
+                c = QtGui.QColor(("#fff4c8" if size > 4.5 else "#cfe0ff") if self.night else
+                                 (T["yellow"] if size > 4.5 else T["green"]))
+                c.setAlpha(int(255 * (1 - burst)))
                 p.setBrush(c)
                 p.drawEllipse(QtCore.QPointF(cx + math.cos(ang) * dist, cy + math.sin(ang) * dist), size, size)
         # 4. text slides up and fades in (55 - 100 %)
@@ -1119,7 +1154,8 @@ class LoggingComplete(QtWidgets.QWidget):
             p.setFont(f); p.setPen(QtGui.QColor("#ffffff"))
             y0 = cy + R * 1.35 + (1 - tx) * 20
             fh = QtGui.QFontMetricsF(f).height()
-            p.drawText(QtCore.QRectF(0, y0, self.width(), fh * 1.2), QtCore.Qt.AlignHCenter, "Logging Complete")
+            p.drawText(QtCore.QRectF(0, y0, self.width(), fh * 1.2), QtCore.Qt.AlignHCenter,
+                       "That's a wrap, get some sleep" if self.night else "Logging Complete")
             f2 = QtGui.QFont(self.font()); f2.setPointSizeF(max(11.0, R * 0.12))
             p.setFont(f2); p.setPen(QtGui.QColor("#d8dde3"))
             y = y0 + fh * 1.3
@@ -1184,7 +1220,11 @@ class FlowLayout(QtWidgets.QLayout):
         x, y, row_h = r.x(), r.y(), 0
         row = []
 
+        rows = []
+
         def place(row, y, row_h):
+            if row:
+                rows.append((y, y + row_h, [it for it, _, _ in row]))
             if not test:
                 for it, xx, sz in row:           # centre each item vertically in its row
                     it.setGeometry(QtCore.QRect(QtCore.QPoint(xx, y + (row_h - sz.height()) // 2), sz))
@@ -1203,6 +1243,8 @@ class FlowLayout(QtWidgets.QLayout):
             x += sz.width() + self._sp
             row_h = max(row_h, sz.height())
         place(row, y, row_h)
+        if not test:
+            self.rows = rows
         return y + row_h - rect.y() + m.bottom()
 
 
@@ -1276,6 +1318,14 @@ class ReorderBar(QtWidgets.QWidget):
     def minimumSizeHint(self):
         """Narrow enough to never hold the window open; tall enough for the rows we wrap into."""
         return QtCore.QSize(self.lay.minimumSize().width(), self.sizeHint().height())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # the toolbar gave us less room than we asked for: wrap for the width we really got
+        if self.avail and 0 < self.width() < self.avail and \
+                self.lay.heightForWidth(self.width()) > self.height():
+            self.avail = max(self.width(), self.lay.minimumSize().width())
+            QtCore.QTimer.singleShot(0, self.updateGeometry)
 
     def set_avail(self, w):
         w = max(int(w), self.lay.minimumSize().width())
@@ -1358,13 +1408,25 @@ class ReorderBar(QtWidgets.QWidget):
         self._marker.hide()
 
     def _drop_index(self, pos):
+        """Where a dragged button lands: find the row under the pointer, then the gap within that row."""
         x, y = pos.x(), pos.y()
         keys = self.order()
-        for i, k in enumerate(keys):          # row by row: first item on a lower row, or left of centre on ours
-            g = self.items[k].geometry()
-            if y < g.top() - 2 or (y <= g.bottom() + 2 and x < g.center().x()):
-                return i
-        return len(keys)
+        rows = [[it.widget().property("bar_key") for it in r[2]
+                 if it.widget() is not None and it.widget().property("bar_key")]
+                for r in getattr(self.lay, "rows", [])] or [keys]
+        bands = getattr(self.lay, "rows", [(0, self.height(), None)])
+        ri = len(rows) - 1
+        for i, (top, bot, _) in enumerate(bands):
+            if y < bot + self.lay._sp / 2:
+                ri = i
+                break
+        row = [k for k in rows[ri] if k in keys]
+        for k in row:
+            if x < self.items[k].geometry().center().x():
+                return keys.index(k)
+        if not row:
+            return len(keys)
+        return keys.index(row[-1]) + 1
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasFormat(self.MIME) and bytes(ev.mimeData().data(self.MIME)).decode() in self.items:
@@ -1731,6 +1793,290 @@ class Thumb(QtWidgets.QWidget):
         self.r[self.state].render(p, QtCore.QRectF(self.rect()))
 
 
+# ---------- easter eggs: little moments drawn over the big meter (never block clicks, never hide alarms long)
+class EggOverlay(QtWidgets.QWidget):
+    """Transparent layer over the main meter tile: gold-star 'Reference Level Achieved' and the
+    over-110 dB 'needle snapped' glitch with a Warranty Void sticker."""
+    def __init__(self, panel, target):
+        super().__init__(panel)
+        self.panel, self.target = panel, target      # target() -> the widget we draw over right now
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
+        self.kind, self.t0, self.dur = None, 0.0, 1.0
+        self.rng = np.random.default_rng()
+        self.stars = []
+        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._frame)
+        panel.installEventFilter(self)
+        self.hide()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Resize:
+            self.setGeometry(self.target().geometry())
+        return False
+
+    def play(self, kind):
+        self.kind, self.t0 = kind, time.time()
+        self.dur = 2.6 if kind == "ref" else 1.1
+        if kind == "ref":
+            self.stars = [(self.rng.uniform(0, 2 * math.pi), self.rng.uniform(0.35, 1.0), self.rng.uniform(5, 11),
+                           self.rng.uniform(-3, 3)) for _ in range(22)]
+        self.setGeometry(self.target().geometry())
+        self.show(); self.raise_()
+        self.timer.start(16)
+
+    def _frame(self):
+        if time.time() - self.t0 > self.dur:
+            self.timer.stop(); self.hide(); self.kind = None
+        self.update()
+
+    @staticmethod
+    def _star(cx, cy, r):
+        path = QtGui.QPainterPath()
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            rr = r if i % 2 == 0 else r * 0.45
+            pt = QtCore.QPointF(cx + math.cos(a) * rr, cy + math.sin(a) * rr)
+            path.moveTo(pt) if i == 0 else path.lineTo(pt)
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, _):
+        if not self.kind:
+            return
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        t = (time.time() - self.t0) / self.dur
+        w, h = self.width(), self.height()
+        if self.kind == "ref":
+            ease = 1 - (1 - min(t * 2.2, 1.0)) ** 3
+            fade = 1.0 if t < 0.75 else max(0.0, (1 - t) / 0.25)
+            cx, cy = w * 0.5, h * 0.42
+            R = min(w, h) * 0.45
+            p.setPen(QtCore.Qt.NoPen)
+            for ang, spd, size, spin in self.stars:
+                d = R * spd * ease
+                c = QtGui.QColor("#ffd34d"); c.setAlpha(int(255 * fade))
+                p.setBrush(c)
+                p.save()
+                p.translate(cx + math.cos(ang) * d, cy + math.sin(ang) * d)
+                p.rotate(spin * 120 * t)
+                p.drawPath(self._star(0, 0, size * (0.6 + 0.4 * ease)))
+                p.restore()
+            p.setOpacity(fade)
+            f = QtGui.QFont(self.font()); f.setBold(True); f.setPointSizeF(max(12.0, min(w * 0.035, h * 0.07)))
+            p.setFont(f)
+            fm = QtGui.QFontMetricsF(f)
+            text = "★  Reference Level Achieved  ★"
+            tw = fm.horizontalAdvance(text) + 36
+            box = QtCore.QRectF(cx - tw / 2, h * 0.72 - fm.height(), tw, fm.height() * 1.6)
+            p.setBrush(QtGui.QColor(20, 16, 4, 200)); p.setPen(QtGui.QPen(QtGui.QColor("#ffd34d"), 2))
+            p.drawRoundedRect(box, 10, 10)
+            p.setPen(QtGui.QColor("#ffd34d"))
+            p.drawText(box, QtCore.Qt.AlignCenter, text)
+        else:   # "glitch": the meter 'breaks' for a moment, then pulls itself together
+            k = max(0.0, 1 - t)
+            for _ in range(int(14 * k) + 2):           # torn scanlines
+                y = self.rng.uniform(0, h); hh = self.rng.uniform(2, 10)
+                c = QtGui.QColor(*(self.rng.integers(120, 255, 3).tolist()), int(90 * k))
+                p.fillRect(QtCore.QRectF(self.rng.uniform(-40, 40), y, w, hh), c)
+            pen = QtGui.QPen(QtGui.QColor(255, 230, 120, int(255 * k)), 2.2)
+            p.setPen(pen)
+            for _ in range(5):                         # sparks zig-zagging off the number
+                x, y = self.rng.uniform(w * 0.45, w * 0.95), self.rng.uniform(h * 0.15, h * 0.5)
+                path = QtGui.QPainterPath(QtCore.QPointF(x, y))
+                for _ in range(4):
+                    x += self.rng.uniform(-24, 24); y += self.rng.uniform(-18, 18)
+                    path.lineTo(x, y)
+                p.drawPath(path)
+            # the sticker, slapped on at an angle in the corner (not over the number)
+            p.save()
+            sw, sh = max(120.0, w * 0.16), max(44.0, w * 0.055)
+            p.translate(w * 0.16, h * 0.72)
+            p.rotate(-12 + 4 * math.sin(t * 20) * k)
+            r = QtCore.QRectF(-sw / 2, -sh / 2, sw, sh)
+            p.setPen(QtGui.QPen(QtGui.QColor("#7a5c00"), 2)); p.setBrush(QtGui.QColor("#ffd21f"))
+            p.drawRoundedRect(r, 6, 6)
+            p.setPen(QtGui.QPen(QtGui.QColor("#111111"), 1, QtCore.Qt.DashLine))
+            p.drawRoundedRect(r.adjusted(4, 4, -4, -4), 4, 4)
+            f = QtGui.QFont(self.font()); f.setBold(True); f.setPointSizeF(sh * 0.30)
+            p.setFont(f); p.setPen(QtGui.QColor("#111111"))
+            p.drawText(r, QtCore.Qt.AlignCenter, "WARRANTY\nVOID")
+            p.restore()
+
+
+class RetroVu(QtWidgets.QWidget):
+    """Secret skin for the big meter: walnut panel, cream VU face, swinging needle, glowing tubes and a little
+    nixie-style readout. All drawn here from scratch."""
+    LO, HI = 40.0, 120.0
+
+    def __init__(self):
+        super().__init__()
+        self.level = float("nan")
+        self.needle = self.LO
+        self.vel = 0.0
+        self.alarm = 100.0
+        self.warn = 95.0
+        self.color = "#e8e8e8"
+        self._last = time.time()
+        rng = np.random.default_rng(7)
+        self.grain = [(rng.uniform(0, 1), rng.uniform(0.002, 0.012), rng.uniform(-0.15, 0.15), rng.uniform(0, 6.28))
+                      for _ in range(70)]
+        self.setMinimumSize(200, 120)
+
+    def set_level(self, v, color, warn, alarm):
+        self.level, self.color, self.warn, self.alarm = v, color, warn, alarm
+        now = time.time(); dt = min(0.1, now - self._last); self._last = now
+        target = v if np.isfinite(v) else self.LO
+        target = min(max(target, self.LO - 2), self.HI + 1.5)
+        # a damped spring: the needle swings up, overshoots a touch and settles, like a real movement
+        k, damp = 90.0, 13.0
+        self.vel += (k * (target - self.needle) - damp * self.vel) * dt
+        self.needle += self.vel * dt
+        self.update()
+
+    def _ang(self, v):                                 # dB -> needle angle (degrees from vertical)
+        f = (min(max(v, self.LO - 2), self.HI + 1.5) - self.LO) / (self.HI - self.LO)
+        return -48 + 96 * f
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        W, H = self.width(), self.height()
+        # walnut panel
+        wood = QtGui.QLinearGradient(0, 0, 0, H)
+        wood.setColorAt(0, QtGui.QColor("#6b3f22")); wood.setColorAt(0.5, QtGui.QColor("#5a321a"))
+        wood.setColorAt(1, QtGui.QColor("#3f2312"))
+        panel = QtCore.QRectF(0, 0, W, H).adjusted(1, 1, -1, -1)
+        p.setPen(QtGui.QPen(QtGui.QColor("#2a160a"), 2)); p.setBrush(wood)
+        p.drawRoundedRect(panel, 10, 10)
+        p.save(); p.setClipRect(panel)
+        for y, thick, tilt, ph in self.grain:
+            c = QtGui.QColor(30, 14, 4, 50)
+            p.setPen(QtGui.QPen(c, max(1.0, thick * H)))
+            path = QtGui.QPainterPath(QtCore.QPointF(0, y * H))
+            for i in range(1, 13):
+                x = W * i / 12
+                path.lineTo(x, y * H + tilt * x * 0.2 + math.sin(ph + i * 0.9) * H * 0.012)
+            p.drawPath(path)
+        p.restore()
+        for sx, sy in ((14, 14), (W - 14, 14), (14, H - 14), (W - 14, H - 14)):   # brass screws
+            g = QtGui.QRadialGradient(QtCore.QPointF(sx - 2, sy - 2), 7)
+            g.setColorAt(0, QtGui.QColor("#f3d98a")); g.setColorAt(1, QtGui.QColor("#8a6a22"))
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(g); p.drawEllipse(QtCore.QPointF(sx, sy), 5, 5)
+            p.setPen(QtGui.QPen(QtGui.QColor("#5a4512"), 1.2)); p.drawLine(QtCore.QPointF(sx - 3, sy + 2), QtCore.QPointF(sx + 3, sy - 2))
+        # layout: face on top, tubes + readout underneath
+        tube_h = max(34.0, H * 0.2)
+        face = QtCore.QRectF(W * 0.08, H * 0.07, W * 0.84, H - tube_h - H * 0.14)
+        fg = QtGui.QLinearGradient(0, face.top(), 0, face.bottom())
+        fg.setColorAt(0, QtGui.QColor("#fbf1d6")); fg.setColorAt(1, QtGui.QColor("#e9d9ae"))
+        p.setPen(QtGui.QPen(QtGui.QColor("#1b120a"), 3)); p.setBrush(fg)
+        p.drawRoundedRect(face, 8, 8)
+        # scale arc
+        cx = face.center().x()
+        R = min(face.width() * 0.48, face.height() * 0.92)
+        cy = face.top() + face.height() * 0.12 + R
+        arc = QtCore.QRectF(cx - R * 0.86, cy - R * 0.86, R * 1.72, R * 1.72)
+        p.setPen(QtGui.QPen(QtGui.QColor("#2b2118"), 2)); p.setBrush(QtCore.Qt.NoBrush)
+        a0, a1 = 90 + 48, 90 - 48
+        a_red = 90 - self._ang(self.alarm)
+        p.drawArc(arc, int(a1 * 16), int((a0 - a1) * 16))
+        p.setPen(QtGui.QPen(QtGui.QColor("#c3261e"), max(4.0, R * 0.05), QtCore.Qt.SolidLine, QtCore.Qt.FlatCap))
+        p.drawArc(arc, int(a1 * 16), int((a_red - a1) * 16))
+        f = QtGui.QFont(self.font()); f.setPointSizeF(max(7.0, R * 0.075)); f.setBold(True)
+        p.setFont(f)
+        for v in range(int(self.LO), int(self.HI) + 1, 5):
+            ang = math.radians(self._ang(v))
+            major = v % 10 == 0
+            r0, r1 = R * 0.86, R * (0.96 if major else 0.92)
+            col = QtGui.QColor("#c3261e" if v >= self.alarm else "#2b2118")
+            p.setPen(QtGui.QPen(col, 2 if major else 1.2))
+            p.drawLine(QtCore.QPointF(cx + math.sin(ang) * r0, cy - math.cos(ang) * r0),
+                       QtCore.QPointF(cx + math.sin(ang) * r1, cy - math.cos(ang) * r1))
+            if major:
+                rt = R * 1.06
+                p.drawText(QtCore.QRectF(cx + math.sin(ang) * rt - 20, cy - math.cos(ang) * rt - 10, 40, 20),
+                           QtCore.Qt.AlignCenter, str(v))
+        f2 = QtGui.QFont(f); f2.setPointSizeF(max(8.0, R * 0.09)); f2.setItalic(True)
+        p.setFont(f2); p.setPen(QtGui.QColor("#2b2118"))
+        p.drawText(QtCore.QRectF(cx - R * 0.5, cy - R * 0.5, R, R * 0.2), QtCore.Qt.AlignCenter, "dB SPL")
+        # needle (+ a soft shadow), pivot cap hidden below the face edge like a real meter
+        ang = math.radians(self._ang(self.needle))
+        tip = QtCore.QPointF(cx + math.sin(ang) * R * 0.95, cy - math.cos(ang) * R * 0.95)
+        base = QtCore.QPointF(cx, cy)
+        p.save(); p.setClipRect(face.adjusted(3, 3, -3, -3))
+        p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 60), 4)); p.drawLine(base + QtCore.QPointF(3, 3), tip + QtCore.QPointF(3, 3))
+        p.setPen(QtGui.QPen(QtGui.QColor("#111111"), 2.2)); p.drawLine(base, tip)
+        p.restore()
+        # glowing tubes, brighter when it's loud
+        lvl = self.level if np.isfinite(self.level) else self.LO
+        heat = min(max((lvl - 55) / 50, 0.08), 1.0)
+        n = 2
+        ty = face.bottom() + H * 0.04
+        tw = max(22.0, tube_h * 0.6)
+        read_w = max(110.0, W * 0.3)
+        xs = [W * 0.5 - read_w / 2 - 18 - tw, W * 0.5 + read_w / 2 + 18]
+        for i in range(n):
+            x = xs[i]
+            body = QtCore.QRectF(x, ty, tw, tube_h)
+            glow = QtGui.QRadialGradient(body.center(), tw * 1.4)
+            flick = 0.85 + 0.15 * math.sin(time.time() * (9 + i * 3))
+            glow.setColorAt(0, QtGui.QColor(255, 150, 40, int(200 * heat * flick)))
+            glow.setColorAt(1, QtGui.QColor(255, 120, 20, 0))
+            p.setPen(QtCore.Qt.NoPen); p.setBrush(glow); p.drawEllipse(body.center(), tw * 1.4, tw * 1.4)
+            glass = QtGui.QLinearGradient(body.left(), 0, body.right(), 0)
+            glass.setColorAt(0, QtGui.QColor(255, 255, 255, 40)); glass.setColorAt(0.5, QtGui.QColor(255, 210, 150, 90))
+            glass.setColorAt(1, QtGui.QColor(255, 255, 255, 30))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 230, 200, 120), 1)); p.setBrush(glass)
+            p.drawRoundedRect(body, tw / 2, tw / 2)
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 170, 60, int(80 + 175 * heat)), 2))
+            p.drawLine(QtCore.QPointF(body.center().x(), body.top() + tube_h * 0.3),
+                       QtCore.QPointF(body.center().x(), body.bottom() - tube_h * 0.2))
+        # nixie-style readout
+        rd = QtCore.QRectF(W * 0.5 - read_w / 2, ty, read_w, tube_h)
+        p.setPen(QtGui.QPen(QtGui.QColor("#1a0d05"), 2)); p.setBrush(QtGui.QColor("#120a06"))
+        p.drawRoundedRect(rd, 6, 6)
+        f3 = QtGui.QFont("Menlo"); f3.setStyleHint(QtGui.QFont.Monospace); f3.setBold(True)
+        f3.setPointSizeF(max(10.0, tube_h * 0.5))
+        p.setFont(f3)
+        txt = fmt(self.level).strip() if np.isfinite(self.level) else "--.-"
+        col = QtGui.QColor("#ff9a3c")
+        if np.isfinite(self.level) and self.level >= self.alarm:
+            col = QtGui.QColor("#ff4a3a")
+        for blur, a in ((3, 60), (1.5, 110)):
+            p.setPen(QtGui.QColor(col.red(), col.green(), col.blue(), a))
+            p.drawText(rd.translated(blur, 0), QtCore.Qt.AlignCenter, txt)
+            p.drawText(rd.translated(-blur, 0), QtCore.Qt.AlignCenter, txt)
+        p.setPen(col); p.drawText(rd, QtCore.Qt.AlignCenter, txt)
+
+
+class KeyCombo(QtCore.QObject):
+    """Watches the arrow keys typed while ServiceSPL is in front; fires when the secret sequence comes up."""
+    SEQ = [QtCore.Qt.Key_Up, QtCore.Qt.Key_Up, QtCore.Qt.Key_Down, QtCore.Qt.Key_Down,
+           QtCore.Qt.Key_Left, QtCore.Qt.Key_Right, QtCore.Qt.Key_Left, QtCore.Qt.Key_Right]
+
+    def __init__(self, main, fn):
+        super().__init__(main)
+        self.main, self.fn, self.buf, self.t = main, fn, [], 0.0
+        self._seen = None
+        QtWidgets.QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.KeyPress and not ev.isAutoRepeat() \
+                and QtWidgets.QApplication.activeWindow() is self.main:
+            fw = QtWidgets.QApplication.focusWidget() or self.main
+            if obj is not fw:                         # a key press reaches several widgets: count it once
+                return False
+            now = time.time()
+            if now - self.t > 2.0:
+                self.buf = []
+            self.t = now
+            self.buf = (self.buf + [ev.key()])[-len(self.SEQ):]
+            if self.buf == self.SEQ:
+                self.buf = []
+                QtCore.QTimer.singleShot(0, self.fn)
+        return False
+
+
 SPEC_LUT = None
 
 
@@ -2029,11 +2375,21 @@ class MeterPanel(QtWidgets.QWidget):
         hr = QtWidgets.QHBoxLayout()
         hr.addWidget(self.thumb); hr.addWidget(self.main_tile.v, 1)
         ml.insertLayout(1, hr)
+        self.thumb_row = hr
         self.history = HistoryStrip(main.cfg["history_secs"])
         self.bar = LevelBar()
         ml.addWidget(self.history, 1)
         ml.addWidget(self.bar)
         v.addWidget(self.main_tile, 3)
+        # secret retro VU skin (arrow-key combo), same slot as the main tile
+        self.vu_box = QtWidgets.QWidget()
+        vb = QtWidgets.QHBoxLayout(self.vu_box); vb.setContentsMargins(0, 0, 0, 0); vb.setSpacing(8)
+        self.vu = RetroVu()
+        self.vu_row = vb
+        vb.addWidget(self.vu, 1)
+        self.vu_box.hide()
+        v.addWidget(self.vu_box, 3)
+        self.eggs = EggOverlay(self, lambda: self.vu_box if self.vu_box.isVisible() else self.main_tile)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(6)
         self.t_1m = Tile("LAeq 1 min", tip="A-weighted equivalent level over the last minute")
@@ -2050,6 +2406,7 @@ class MeterPanel(QtWidgets.QWidget):
         self.banner_until = 0
         self.apply_style()
         self.setMinimumSize(200, 140)
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)    # clicking the meter takes focus off the toolbar combos
         self.reflow()
 
     def reflow(self):
@@ -2085,6 +2442,19 @@ class MeterPanel(QtWidgets.QWidget):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self.reflow()
+
+    def set_vu(self, on):
+        """Swap the big number for the retro VU skin (the thumb comes along)."""
+        if on == self.vu_box.isVisible():
+            return
+        if on:
+            self.thumb_row.removeWidget(self.thumb)
+            self.vu_row.insertWidget(0, self.thumb, 0, QtCore.Qt.AlignVCenter)
+        else:
+            self.vu_row.removeWidget(self.thumb)
+            self.thumb_row.insertWidget(0, self.thumb)
+        self.main_tile.setVisible(not on)
+        self.vu_box.setVisible(on)
 
     def tiles(self):
         return [self.main_tile, self.t_1m, self.t_long, self.t_tot, self.t_clong,
@@ -2320,10 +2690,12 @@ class SessionPanel(QtWidgets.QWidget):
         v.addLayout(meta)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)   # drag the line between graph and markers/alarms
         split.setChildrenCollapsible(False)
+        side_min = 150
         split.setHandleWidth(9)
         self.graph = SessionGraph(main)
         split.addWidget(self.graph)
-        side_w = QtWidgets.QWidget()
+        self.graph.setMinimumWidth(120)
+        side_w = QtWidgets.QWidget(); side_w.setMinimumWidth(side_min)
         side = QtWidgets.QVBoxLayout(side_w); side.setContentsMargins(0, 0, 0, 0)
         side.addWidget(QtWidgets.QLabel("Markers & events"))
         self.events = QtWidgets.QListWidget()
@@ -2348,9 +2720,10 @@ class SessionPanel(QtWidgets.QWidget):
         split.addWidget(side_w)
         split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
         sizes = main.cfg.get("session_split")
-        if sizes:
+        if sizes and len(sizes) == 2 and min(sizes) >= 60:
             split.setSizes(sizes)
-        split.splitterMoved.connect(lambda *_: main.cfg.__setitem__("session_split", split.sizes()))
+        split.splitterMoved.connect(lambda *_: main.cfg.__setitem__("session_split", split.sizes())
+                                    if min(split.sizes()) >= 60 else None)
         v.addWidget(split, 1)
         self.split = split
         self.load_rules()
@@ -4645,8 +5018,15 @@ class PopupPanel(QtWidgets.QFrame):
         self.save()
 
     def keep_inside(self):
-        """Stay fully inside the main window (shrink if the window got smaller)."""
+        """Stay inside the dashboard area (below the toolbars, above the bottom bar); shrink if it got smaller."""
         r = self.host.rect().adjusted(4, 4, -4, -4)
+        try:
+            top = max(tb.geometry().bottom() for tb in (self.host.findChild(QtWidgets.QToolBar, "toolbar"),
+                                                         self.host.tools_bar) if tb is not None and tb.isVisible())
+            bottom = self.host.outputs_bar.geometry().top()
+            r = QtCore.QRect(r.left(), top + 4, r.width(), max(120, bottom - top - 8))
+        except Exception:
+            pass
         g = self.geometry()
         w, h = min(g.width(), r.width()), min(g.height(), r.height())
         x = min(max(g.x(), r.left()), r.right() - w + 1)
@@ -4672,7 +5052,7 @@ class PopupPanel(QtWidgets.QFrame):
         t = ev.type()
         if obj is self.host:
             if t == QtCore.QEvent.Resize and self.isVisible():
-                self.keep_inside()
+                QtCore.QTimer.singleShot(0, self.keep_inside)     # after the toolbars have re-wrapped
             return False
         if t == QtCore.QEvent.MouseButtonPress and ev.button() == QtCore.Qt.LeftButton:
             self._drag = ev.globalPosition().toPoint() - self.pos()
@@ -4727,7 +5107,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sched_skip = set()
         self._sched_stopping = False
         self._last_sec = 0
+        self._ref_since, self._ref_armed, self._glitch_next = None, True, 0.0
         self._build_ui()
+        self.combo = KeyCombo(self, self.toggle_vu_skin)
+        if self.cfg.get("vu_skin"):
+            self.meter.set_vu(True)
         self.populate_devices()
         self.restore_layout()
         self.update_menubar_meter()
@@ -4936,7 +5320,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addToolBar(QtCore.Qt.BottomToolBarArea, bottom)
         out_lbl = QtWidgets.QLabel("  Show the meter on:  ")
         out_lbl.setObjectName("outlbl")
-        bottom.addWidget(out_lbl)
+        self.out_lbl_act = bottom.addWidget(out_lbl)
         self.out_bar = ReorderBar("outputs")
         for key, w in (("mini", self.mini_btn), ("web", self.web_btn), ("ndi", self.ndi_btn)):
             self.out_bar.add(key, w)
@@ -5028,22 +5412,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         mb = self.menuBar()
         fm = mb.addMenu("&File")
-        fm.addAction("Export session CSV…", lambda: self.export_csv())
-        fm.addAction("Export PDF report…", lambda: self.export_pdf())
+        fm.addAction("Export session CSV…", lambda: self.export_csv(), QtGui.QKeySequence("Ctrl+E"))
+        fm.addAction("Export PDF report…", lambda: self.export_pdf(), QtGui.QKeySequence("Ctrl+P"))
         fm.addAction("New session", lambda: self.new_session())
         fm.addSeparator()
         fm.addAction("Export settings…", lambda: self.export_settings())
         fm.addAction("Import settings…", lambda: self.import_settings())
         fm.addSeparator()
-        fm.addAction("Settings…", self.settings)
+        fm.addAction("Settings…", self.settings, QtGui.QKeySequence("Ctrl+,"))
         vm = mb.addMenu("&View")
+        for i, k in enumerate(("rta", "spectro", "session", "dose", "pco"), 1):    # ⌘1-⌘5 show / hide panels
+            self.docks[k].toggleViewAction().setShortcut(QtGui.QKeySequence(f"Ctrl+{i}"))
         for d in self.docks.values():
             vm.addAction(d.toggleViewAction())
         vm.addSeparator()
         vm.addAction("Show all panels", lambda: [d.show() for d in self.docked()])
         vm.addAction("Hide all panels", lambda: [d.hide() for d in self.docks.values()])
         vm.addSeparator()
-        vm.addAction("Mini meter", self.enter_mini)
+        vm.addAction("Mini meter", self.enter_mini, QtGui.QKeySequence("Ctrl+Shift+M"))
         self.web_act = vm.addAction("Web view", lambda: self.web_btn.click())
         self.ndi_act = vm.addAction("NDI output", lambda: self.ndi_btn.click())
         vm.addSeparator()
@@ -5054,16 +5440,20 @@ class MainWindow(QtWidgets.QMainWindow):
         vm.addAction("Quarter-screen size", self.quarter_size)
         vm.addAction("Fit to screen", lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))
         tm = mb.addMenu("&Tools")
+        tm.addAction("Start / stop meter", lambda: self.run_btn.click(), QtGui.QKeySequence("Ctrl+R"))
+        tm.addAction("Log on / off", lambda: self.log_btn.click(), QtGui.QKeySequence("Ctrl+L"))
+        tm.addSeparator()
         tm.addAction("Calibration wizard…", self.calibrate)
         tm.addAction("Calibrate with pink noise from my speakers…", self.calibrate_pink)
         tm.addAction("Drop marker", lambda: self.add_marker(), QtGui.QKeySequence("M"))
         tm.addAction("Marker with note…", self.add_marker_note, QtGui.QKeySequence("Shift+M"))
-        tm.addAction("Reset Leq / Max / Peak", self.reset_stats)
+        tm.addAction("Reset Leq / Max / Peak", self.reset_stats, QtGui.QKeySequence("Ctrl+Shift+R"))
         tm.addAction("Reset dose", self.dose_panel.reset)
         tm.addAction("Logging schedule…", self.edit_schedule)
         tm.addAction("Start service item…", self.pco_panel.manual_item)
         hm = mb.addMenu("&Help")
         hm.addAction("Guide…", lambda: self.guide())
+        hm.addAction("Keyboard shortcuts…", self.show_shortcuts, QtGui.QKeySequence("Ctrl+/"))
         hm.addAction("Room EQ helper…", lambda: self.guide("Room EQ"))
         hm.addAction("Calibrate with pink noise from my speakers…", self.calibrate_pink)
         hm.addSeparator()
@@ -5081,9 +5471,13 @@ class MainWindow(QtWidgets.QMainWindow):
         pad = 14 + 2 * self.style().pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
         self.top_bar.set_avail(w - pad)
         self.tool_bar.set_avail(w - pad)
-        rest = w - pad - self.out_lbl.sizeHint().width()
-        self.pop_bar.set_avail(max(rest // 2, rest - self.out_bar.lay.sizeHint().width() - 12))
-        self.out_bar.set_avail(rest - self.pop_bar.sizeHint().width() - 12)
+        self.out_lbl_act.setVisible(w >= 640)      # narrow window: drop the label, keep the buttons
+        rest = w - pad - (self.out_lbl.sizeHint().width() if w >= 640 else 0) - 12
+        one_out, one_pop = self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
+        if one_out + one_pop <= rest:
+            self.out_bar.set_avail(one_out); self.pop_bar.set_avail(one_pop)
+        else:                                       # share the row so each side wraps evenly
+            self.out_bar.set_avail(rest // 2); self.pop_bar.set_avail(rest - rest // 2)
 
     def resizeEvent(self, ev):
         self.fit_bars()
@@ -5093,6 +5487,73 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_w = None
         self.fit_bars()
         super().showEvent(ev)
+
+    SHORTCUTS = [
+        ("Meter", [("Ctrl+R", "Start / stop the meter"), ("Ctrl+L", "Logging on / off"),
+                   ("Ctrl+Shift+R", "Reset Leq / Max / Peak / Ln")]),
+        ("Session", [("M", "Drop a marker"), ("Shift+M", "Marker with a note"),
+                     ("Ctrl+E", "Export session CSV"), ("Ctrl+P", "PDF report")]),
+        ("Panels", [("Ctrl+1", "RTA"), ("Ctrl+2", "Spectrogram"), ("Ctrl+3", "Session"),
+                    ("Ctrl+4", "Dosimeter pop-up"), ("Ctrl+5", "Planning Center pop-up"),
+                    ("Ctrl+Shift+M", "Mini meter")]),
+        ("App", [("Ctrl+,", "Settings"), ("Ctrl+/", "This list"), ("Esc", "Close a pop-up box")]),
+    ]
+
+    def show_shortcuts(self):
+        d = QtWidgets.QDialog(self)
+        d.setWindowTitle("Keyboard shortcuts")
+        v = QtWidgets.QVBoxLayout(d)
+        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(18); grid.setVerticalSpacing(6)
+        row = 0
+        for section, items in self.SHORTCUTS:
+            h = QtWidgets.QLabel(section)
+            h.setStyleSheet(f"color:{T['dim']}; font-weight:700; font-size:9pt; padding-top:6px;")
+            grid.addWidget(h, row, 0, 1, 2); row += 1
+            for keys, what in items:
+                k = QtWidgets.QLabel(QtGui.QKeySequence(keys).toString(QtGui.QKeySequence.NativeText) or keys)
+                k.setStyleSheet(f"background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:5px; "
+                                f"padding:2px 8px; {MONO} font-weight:600;")
+                k.setAlignment(QtCore.Qt.AlignCenter)
+                grid.addWidget(k, row, 0)
+                grid.addWidget(QtWidgets.QLabel(what), row, 1)
+                row += 1
+        grid.setColumnStretch(1, 1)
+        v.addLayout(grid)
+        note = QtWidgets.QLabel("M and Shift+M work anywhere except while you're typing in a text box.")
+        note.setWordWrap(True); note.setStyleSheet(f"color:{T['dim']};")
+        v.addWidget(note)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(d.reject)
+        v.addWidget(bb)
+        exec_in_window(d)
+
+    # ---------- easter eggs
+    def easter_eggs(self, main, now):
+        eg = self.meter.eggs
+        # 1. hold exactly 85.0 dBA for 3 seconds: Reference Level Achieved
+        on_ref = self.cfg["main_weight"] == "A" and np.isfinite(main) and f"{main:.1f}" == "85.0"
+        if on_ref:
+            if self._ref_since is None:
+                self._ref_since = now
+            if now - self._ref_since >= 3.0 and self._ref_armed and eg.kind is None:
+                self._ref_armed = False
+                eg.play("ref")
+        else:
+            self._ref_since = None
+            if not np.isfinite(main) or abs(main - 85.0) > 1.0:
+                self._ref_armed = True            # wander off and come back to earn it again
+        # 4. over 110 dB: the meter 'breaks' for a second (at most once a minute; real alarms carry on)
+        if np.isfinite(main) and main > 110.0 and now >= self._glitch_next and eg.kind is None:
+            self._glitch_next = now + 60.0
+            eg.play("glitch")
+
+    def toggle_vu_skin(self):
+        on = not self.meter.vu_box.isVisible()
+        self.meter.set_vu(on)
+        self.cfg["vu_skin"] = on
+        self.save_cfg()
+        self.status.showMessage("Retro VU skin on. Same keys again to switch back." if on
+                                else "Retro VU skin off.", 5000)
 
     def docked(self):
         return [d for d in self.docks.values() if isinstance(d, QtWidgets.QDockWidget)]
@@ -5625,7 +6086,10 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append(f"Saved to {os.path.basename(path)}")
         if self.cfg["autosave_dir"] and self.cfg["autosave_reports"]:
             lines.append("Report auto-saved")
-        self._done_anim = LoggingComplete(self, lines)
+        night = datetime.datetime.now().hour < 4      # wrapped between midnight and 4 AM
+        if night:
+            lines.insert(0, "Logging complete. Go home, the room will still be here tomorrow.")
+        self._done_anim = LoggingComplete(self, lines, night=night)
 
     def write_log(self):
         """Every N seconds write one row: Leq / max / peak / Ln over that interval, plus markers."""
@@ -5822,6 +6286,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thumb.setState("bad" if now < self.bad_until else "good")
         col = T["red"] if now < self.bad_until else self.color_for(main)
         m.main_tile.set(main, col)
+        if m.vu_box.isVisible():
+            m.vu.set_level(main, col, self.cfg["alarm"] - self.cfg["warn_gap"], self.cfg["alarm"])
+        self.easter_eggs(main, now)
         w, t = self.cfg["main_weight"], self.cfg["main_time"]
         sub = (f"L{w}{t}  ·  1 min {fmt(self.last_1m).strip()}  ·  red at {self.cfg['alarm']:.0f}"
                + ("  ·  ● REC" if self.log_writer else ""))
