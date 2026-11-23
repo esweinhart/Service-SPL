@@ -4885,8 +4885,6 @@ class MainWindow(QtWidgets.QMainWindow):
         rst.clicked.connect(self.reset_stats)
         self.log_btn = QtWidgets.QPushButton("●  Log"); self.log_btn.setObjectName("log")
         self.log_btn.setCheckable(True); self.log_btn.clicked.connect(self.toggle_log)
-        mk = QtWidgets.QPushButton("◆ Marker"); mk.setToolTip("Drop a marker in the session and log (M)")
-        mk.clicked.connect(lambda: self.add_marker())
         red = QtWidgets.QWidget()
         rl = QtWidgets.QHBoxLayout(red); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(2)
         lbl = QtWidgets.QLabel("  Red at ")
@@ -4901,7 +4899,7 @@ class MainWindow(QtWidgets.QMainWindow):
         st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
         self.top_bar = ReorderBar("top")
         for key, w in (("input", self.dev), ("channel", self.ch), ("start", self.run_btn), ("profile", self.prof_cb),
-                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn), ("marker", mk)):
+                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
             self.top_bar.add(key, w)
         self.top_bar.divider("div_top1")
         self.top_bar.add("red_at", red)
