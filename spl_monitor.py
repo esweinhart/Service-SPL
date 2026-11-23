@@ -1306,7 +1306,7 @@ class ReorderBar(QtWidgets.QWidget):
                         f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
                         f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
                         "margin:3px 0; }")
-        f.setToolTip("Divider")
+        f.setToolTip("Divider. Unlocked: drag it to move, drag it off the bar or right-click to remove.")
         return self.add(key, f)
 
     def sizeHint(self):
@@ -1341,6 +1341,41 @@ class ReorderBar(QtWidgets.QWidget):
                 out.append(w.property("bar_key"))
         return out
 
+    # ---- dividers: add / remove while unlocked
+    def _drop_widget(self, key):
+        w = self.items.pop(key)
+        self.lay.removeWidget(w)
+        w.hide(); w.deleteLater()
+
+    def remove_divider(self, key):
+        if key in self.items and key.startswith("div_"):
+            self._drop_widget(key)
+            self.updateGeometry()
+            self.changed.emit(self.order())
+
+    def add_divider(self, index):
+        key = f"div_u{int(time.time() * 1000) % 10 ** 9}"
+        self.divider(key)
+        self.set_locked(self.locked)
+        keys = [k for k in self.order() if k != key]
+        keys.insert(max(0, min(index, len(keys))), key)
+        self.apply_order(keys)
+        self.updateGeometry()
+        self.changed.emit(keys)
+
+    def contextMenuEvent(self, ev):
+        if self.locked:
+            return super().contextMenuEvent(ev)
+        pos = QtCore.QPointF(self.mapFromGlobal(ev.globalPos()))
+        hit = self._top_item(self.childAt(pos.toPoint()))
+        menu = QtWidgets.QMenu(self)
+        idx = self._drop_index(pos)
+        menu.addAction("Add a divider here", lambda: self.add_divider(idx))
+        if hit is not None and hit.property("bar_key").startswith("div_"):
+            k = hit.property("bar_key")
+            menu.addAction("Remove this divider", lambda: self.remove_divider(k))
+        menu.exec(ev.globalPos())
+
     def set_tail(self, w):
         """A widget that always sits after the reorderable items and can't be dragged (the lock button)."""
         self.tail = w
@@ -1349,6 +1384,12 @@ class ReorderBar(QtWidgets.QWidget):
     def apply_order(self, keys):
         if not keys:
             return
+        for k in keys:                                   # dividers you added come back
+            if k.startswith("div_") and k not in self.items:
+                self.divider(k)
+                self.set_locked(self.locked)
+        for k in [k for k in self.items if k.startswith("div_") and k not in keys]:
+            self._drop_widget(k)                         # ...and ones you removed stay gone
         seen = [k for k in keys if k in self.items]
         rest = [k for k in self.order() if k not in seen]
         for k in seen + rest:
@@ -1404,8 +1445,13 @@ class ReorderBar(QtWidgets.QWidget):
         drag.setMimeData(md)
         drag.setPixmap(w.grab())
         drag.setHotSpot(QtCore.QPoint(w.width() // 2, w.height() // 2))
-        drag.exec(QtCore.Qt.MoveAction)
+        res = drag.exec(QtCore.Qt.MoveAction)
         self._marker.hide()
+        key = w.property("bar_key")
+        # a divider dragged off the toolbar and let go somewhere else is removed
+        if res == QtCore.Qt.IgnoreAction and key and key.startswith("div_") \
+                and not self.rect().contains(self.mapFromGlobal(QtGui.QCursor.pos())):
+            self.remove_divider(key)
 
     def _drop_index(self, pos):
         """Where a dragged button lands: find the row under the pointer, then the gap within that row."""
@@ -5407,6 +5453,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bars = (self.top_bar, self.tool_bar, self.out_bar, self.pop_bar)
         order = self.cfg.get("bar_order") or {}
         for bar in self.bars:
+            bar.defaults = bar.order()               # for "Reset toolbar button order"
             bar.apply_order(order.get(bar.name))
             bar.changed.connect(lambda keys, bar=bar: self.save_bar_order(bar, keys))
         self.set_bars_locked(True)
@@ -5814,7 +5861,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lock_btn.setToolTip("Buttons are locked. Click to unlock, then drag buttons into a new order."
                                  if locked else "Unlocked: drag any button (or divider) to move it. Click to lock again.")
         if not locked:
-            self.status.showMessage("Toolbar unlocked: drag buttons into a new order, then click 🔓 to lock.", 6000)
+            self.status.showMessage("Toolbar unlocked: drag buttons and dividers into a new order. Right-click to add "
+                                    "or remove a divider (or drag one off the bar). Click 🔓 to lock.", 9000)
         if hasattr(self, "lock_act"):
             self.lock_act.setChecked(locked)
         if hasattr(self, "out_lbl"):          # the lock button changed width: re-wrap the toolbars
@@ -5832,7 +5880,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def reset_bar_order(self):
         self.cfg["bar_order"] = {}
         for bar in self.bars:
-            bar.apply_order(list(bar.items))
+            bar.apply_order(bar.defaults)
         self.save_cfg()
 
     def settings(self):
