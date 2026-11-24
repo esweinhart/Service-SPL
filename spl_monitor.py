@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.2.3"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -652,8 +652,36 @@ PALETTES = {
 T = dict(PALETTES["dark"])
 
 
+def _check_svg():
+    """A white tick for checked check boxes (the style sheet needs an image file)."""
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), "servicespl-check.svg")
+    try:
+        if not os.path.exists(path):
+            with open(path, "w") as fh:
+                fh.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                         '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#ffffff" stroke-width="2.4" '
+                         'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    except OSError:
+        return ""
+    return path.replace("\\", "/")
+
+
 def style_sheet():
+    tick = _check_svg()
     return f"""
+QRadioButton, QCheckBox {{ spacing:7px; background:transparent; }}
+QRadioButton::indicator, QCheckBox::indicator {{ width:14px; height:14px; border:2px solid {T['dim']};
+    background:{T['field']}; }}
+QRadioButton::indicator {{ border-radius:9px; }}
+QCheckBox::indicator {{ border-radius:4px; }}
+QRadioButton::indicator:hover, QCheckBox::indicator:hover {{ border-color:{T['accent']}; }}
+QRadioButton::indicator:checked {{ border-color:{T['accent']};
+    background:qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 {T['accent']}, stop:0.55 {T['accent']},
+    stop:0.6 {T['field']}, stop:1 {T['field']}); }}
+QCheckBox::indicator:checked {{ border-color:{T['accent']}; background:{T['accent']}; image:url({tick}); }}
+QRadioButton::indicator:disabled, QCheckBox::indicator:disabled {{ border-color:{T['off']}; }}
+QRadioButton:disabled, QCheckBox:disabled {{ color:{T['dim']}; }}
 QWidget {{ background:{T['bg']}; color:{T['fg']}; font-family:'Segoe UI','Helvetica Neue',Arial; font-size:10pt; }}
 QFrame#tile {{ background:{T['panel']}; border:1px solid {T['border']}; border-radius:6px; }}
 QMainWindow::separator {{ width:9px; height:9px; }}
@@ -971,6 +999,9 @@ def exec_in_window(dlg):
     parent, flags = dlg.parentWidget(), dlg.windowFlags()
     cover = DialogCover(host, dlg)
     dlg.setWindowFlags(QtCore.Qt.Widget)
+    lay = dlg.layout()
+    if lay is not None:        # never squash the fields below their normal size: the card scrolls instead
+        dlg.setMinimumSize(dlg.minimumSize().expandedTo(lay.totalMinimumSize()))
     cover.scroll.setWidget(dlg)
     cover.place()
     cover.show(); cover.raise_()
@@ -1310,20 +1341,15 @@ class ReorderBar(QtWidgets.QWidget):
         self._marker = QtWidgets.QFrame(self)
         self._marker.setFixedWidth(3); self._marker.hide()
         self.setAcceptDrops(True)
-        self.add_btn = QtWidgets.QPushButton("＋ Divider")
-        self.add_btn.setToolTip("Add a divider at the end of this row, then drag it where you want it")
-        self.add_btn.clicked.connect(lambda: self.add_divider(len(self.order())))
-        self.add_btn.hide()
-        self.lay.addWidget(self.add_btn)
 
     def add(self, key, w):
         w.setProperty("bar_key", key)
         self.items[key] = w
         self.lay.addWidget(w)
-        for t in (getattr(self, "add_btn", None), getattr(self, "tail", None)):   # keep these at the end
-            if t is not None:
-                self.lay.removeWidget(t)
-                self.lay.addWidget(t)
+        t = getattr(self, "tail", None)               # the lock button stays at the end
+        if t is not None:
+            self.lay.removeWidget(t)
+            self.lay.addWidget(t)
         w.installEventFilter(self)
         for c in w.findChildren(QtWidgets.QWidget):
             c.installEventFilter(self)
@@ -1332,23 +1358,22 @@ class ReorderBar(QtWidgets.QWidget):
     def divider(self, key):
         f = QtWidgets.QFrame(); f.setFrameShape(QtWidgets.QFrame.NoFrame)
         f.setObjectName("bardiv")
-        f.setToolTip("Divider. Unlocked: drag it to move, click its ✕ (or drag it off the bar) to remove it.")
+        f.setToolTip("Divider. Right-click to add or remove dividers. Unlock 🔓 to drag it "
+                     "(drag it off the bar to remove it).")
         h = QtWidgets.QHBoxLayout(f); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
-        x = QtWidgets.QToolButton(f); x.setText("✕"); x.setAutoRaise(True)
-        x.setProperty("divider_x", True)
-        x.setToolTip("Remove this divider")
-        x.setCursor(QtCore.Qt.PointingHandCursor)
-        x.setStyleSheet(f"QToolButton {{ border:none; background:transparent; color:{T['red']}; "
-                        "font-size:9pt; font-weight:700; padding:0 2px; }")
-        x.clicked.connect(lambda _=False, k=key: self.remove_divider(k))
-        x.hide()
-        h.addStretch(); h.addWidget(x, 0, QtCore.Qt.AlignVCenter); h.addStretch()
-        f._x = x
+        grip = QtWidgets.QLabel("⋮", f)               # grip dots while unlocked; dragging it drags the divider
+        grip.setAlignment(QtCore.Qt.AlignCenter)
+        grip.setStyleSheet(f"QLabel {{ background:transparent; border:none; color:{T['accent']}; "
+                           "font-size:12pt; font-weight:700; }")
+        grip.hide()
+        h.addWidget(grip)
+        f._grip = grip
         self._style_divider(f, True)
         return self.add(key, f)
 
     def _style_divider(self, f, locked):
         """Locked: a thin line. Unlocked: a wider dashed handle with a ✕, easy to grab or remove."""
+        f.setFixedHeight(28)       # as tall as the buttons, so it's easy to right-click or grab
         if locked:
             f.setFixedWidth(14)
             f.setStyleSheet(f"QFrame#bardiv {{ border:none; "
@@ -1359,7 +1384,7 @@ class ReorderBar(QtWidgets.QWidget):
             f.setFixedWidth(26)
             f.setStyleSheet(f"QFrame#bardiv {{ border:1px dashed {T['accent']}; border-radius:4px; "
                             f"background:{T['btn']}; margin:2px 0; }}")
-        f._x.setVisible(not locked)
+        f._grip.setVisible(not locked)
 
     def sizeHint(self):
         one = self.lay.sizeHint()
@@ -1416,9 +1441,8 @@ class ReorderBar(QtWidgets.QWidget):
         self.changed.emit(keys)
 
     def contextMenuEvent(self, ev):
-        if self.locked:
-            return super().contextMenuEvent(ev)
-        pos = QtCore.QPointF(self.mapFromGlobal(ev.globalPos()))
+        """Right-click (locked or not): add a divider where you clicked, or remove the one under the pointer."""
+        pos = QtCore.QPointF(ev.pos())            # Qt maps this into our coordinates when a child passes it up
         hit = self._top_item(self.childAt(pos.toPoint()))
         menu = QtWidgets.QMenu(self)
         idx = self._drop_index(pos)
@@ -1432,7 +1456,6 @@ class ReorderBar(QtWidgets.QWidget):
         """A widget that always sits after the reorderable items and can't be dragged (the lock button)."""
         self.tail = w
         self.lay.addWidget(w)
-        self.lay.removeWidget(self.add_btn); self.lay.addWidget(self.add_btn)
         self.lay.removeWidget(w); self.lay.addWidget(w)
 
     def apply_order(self, keys):
@@ -1450,19 +1473,17 @@ class ReorderBar(QtWidgets.QWidget):
             w = self.items[k]
             self.lay.removeWidget(w)
             self.lay.addWidget(w)
-        for t in (self.add_btn, getattr(self, "tail", None)):     # these always ride at the end
-            if t is not None:
-                self.lay.removeWidget(t)
-                self.lay.addWidget(t)
+        t = getattr(self, "tail", None)                  # the lock button always rides at the end
+        if t is not None:
+            self.lay.removeWidget(t)
+            self.lay.addWidget(t)
 
     def set_locked(self, locked):
         self.locked = locked
         for w in self.items.values():
-            if hasattr(w, "_x"):
+            if hasattr(w, "_grip"):
                 self._style_divider(w, locked)
-        if getattr(self, "add_btn", None) is not None:
-            self.add_btn.setVisible(not locked)
-            self.updateGeometry()
+        self.updateGeometry()
         for w in self.items.values():
             w.setCursor(QtCore.Qt.ArrowCursor if locked else QtCore.Qt.OpenHandCursor)
             for c in w.findChildren(QtWidgets.QWidget):
@@ -1479,7 +1500,7 @@ class ReorderBar(QtWidgets.QWidget):
         return None
 
     def eventFilter(self, obj, ev):
-        if self.locked or obj.property("divider_x"):      # the ✕ on a divider is a normal button
+        if self.locked:
             return False
         t = ev.type()
         if t in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonDblClick) \
@@ -5861,11 +5882,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
 
     def quarter_size(self):
-        """Half the screen's width and height (1/4 of its area), parked top-right."""
+        """Half the screen's width and height (1/4 of its area), resized where it is (its top-left corner stays
+        put, nudged only if that would push it off the screen)."""
         scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
         self.showNormal()
+        g0 = self.frameGeometry()
         self.resize(scr.width() // 2, scr.height() // 2)
-        self.move(scr.right() - self.frameGeometry().width() + 1, scr.top())
+        g = self.frameGeometry()
+        x = min(max(g0.left(), scr.left()), scr.right() - g.width() + 1)
+        y = min(max(g0.top(), scr.top()), scr.bottom() - g.height() + 1)
+        self.move(x, y)
         self.refit_later(0, 150, 400)
 
     def fit_to_screen(self):

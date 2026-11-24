@@ -28,8 +28,8 @@ needed) and on Windows.
   resize, ✕ to close). They never leave the main window and reopen where you left them. Their buttons sit on the
   right of the bottom bar
 - Toolbar buttons can be **dragged into your own order**: click the **🔒** (end of the second row) to unlock, drag,
-  click again to lock. While unlocked, right-click a toolbar to **add a divider**, right-click a divider (or drag it
-  off the bar) to **remove** it
+  click again to lock. Dividers drag just like buttons while unlocked. Right-click a toolbar any time to **add a
+  divider**, or right-click a divider to **remove** it (dragging one off the bar removes it too)
 - **Mini**, **Web view** and **NDI** sit on the left of the bottom bar
 - Drag the thin lines between the meter and the panels (they light up on hover) to resize them
 - **Help → Keyboard shortcuts…** (⌘/): ⌘R start/stop, ⌘L log, ⌘⇧R reset, M / ⇧M marker, ⌘E CSV, ⌘P PDF,
