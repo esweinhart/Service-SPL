@@ -5699,13 +5699,38 @@ class MainWindow(QtWidgets.QMainWindow):
             + st.pixelMetric(QtWidgets.QStyle.PM_ToolBarItemSpacing)
         self.top_bar.set_avail(w - pad)
         self.tool_bar.set_avail(w - pad)
-        self.out_lbl_act.setVisible(w >= 640)      # narrow window: drop the label, keep the buttons
-        rest = w - pad - (self.out_lbl.sizeHint().width() if w >= 640 else 0) - 12
-        one_out, one_pop = self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
+        # bottom bar stays on one line: first drop the label, then use short names, wrap only as a last resort
+        def widths():
+            for b in (self.out_bar, self.pop_bar):
+                b.lay.invalidate()
+            return self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
+        lbl_w = self.out_lbl.sizeHint().width()
+        self.set_bottom_compact(False)
+        one_out, one_pop = widths()
+        show_lbl = one_out + one_pop + lbl_w <= w - pad - 12
+        if not show_lbl and one_out + one_pop > w - pad - 12:
+            self.set_bottom_compact(True)
+            one_out, one_pop = widths()
+        self.out_lbl_act.setVisible(show_lbl)
+        rest = w - pad - (lbl_w if show_lbl else 0) - 12
         if one_out + one_pop <= rest:
             self.out_bar.set_avail(one_out); self.pop_bar.set_avail(one_pop)
-        else:                                       # share the row so each side wraps evenly
+        else:                                       # tiny window: share the row so each side wraps evenly
             self.out_bar.set_avail(rest // 2); self.pop_bar.set_avail(rest - rest // 2)
+
+    BOTTOM_SHORT = {"mini": ("Mini ⤡", "Mini"), "web": ("Web view", "Web"), "ndi": ("NDI", "NDI"),
+                    "dose": ("Dosimeter", "Dose"), "pco": ("Planning Center", "PCO")}
+
+    def set_bottom_compact(self, on):
+        """Short names and tighter padding on the bottom bar so it fits on one line in a narrow window."""
+        if getattr(self, "_bottom_compact", None) == on:
+            return
+        self._bottom_compact = on
+        for bar in (self.out_bar, self.pop_bar):
+            for key, b in bar.items.items():
+                if key in self.BOTTOM_SHORT:
+                    b.setText(self.BOTTOM_SHORT[key][1 if on else 0])
+                    b.setStyleSheet("QPushButton { padding:5px 7px; }" if on else "")
 
     def resizeEvent(self, ev):
         self.fit_bars()
