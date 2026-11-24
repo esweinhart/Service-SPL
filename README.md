@@ -130,7 +130,7 @@ The **Calibration wizard** (Settings → Meter) offers these methods:
 3 to 10 dB. The big number's title (e.g. **LAS · A-weighted · Slow**) tells you what you're looking at, and the
 wizard's last page shows the reading in the dashboard's weighting with LAS / LCS / LZF underneath.
 
-After any gain change on an analog mic/interface, **recalibrate**. The status bar shows the active profile, how it was
+After any gain change on an analog mic/interface, **recalibrate**. The bottom bar shows the active profile, how it was
 calibrated, and turns yellow when the calibration is more than 30 days old.
 
 ---
@@ -335,8 +335,8 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 | Reads 20–30 dB, doesn't move | macOS is giving the app silence: System Settings → Privacy & Security → Microphone → ServiceSPL on. Then quit and reopen. (The rename means macOS asks for the mic once more.) |
 | "ServiceSPL can't be opened" | Right-click → Open → Open, or Privacy & Security → Open Anyway. |
 | Levels way off with a UMIK cal file | Input volume must be 100 % in Audio MIDI Setup, and use the right file (0° vs 90°). Check with a calibrator. |
-| NOT CALIBRATED in the status bar | Run the Calibration wizard (Settings → Meter) for the active profile, or pick the right profile in the toolbar. |
-| "dropouts" in the status bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
+| NOT CALIBRATED in the bottom bar | Run the Calibration wizard (Settings → Meter) for the active profile, or pick the right profile in the toolbar. |
+| "dropouts" in the bottom bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
 | No menu-bar number | Settings → Display → menu-bar box. (If the Mac build lacks the Cocoa bridge, a colored icon is shown instead.) |
 | Companion button doesn't change | Create the custom variables first (including `spl_d1`…`spl_d4` if you use them); check OSC is enabled in Companion and the IP/port match; for *Paint this button*, use page/row/column like `1/0/0`. |
 | NDI button says runtime not found | Install NDI Tools (ndi.video/tools), or browse to `libndi.dylib` in Settings → Integrations. |

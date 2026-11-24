@@ -5125,6 +5125,60 @@ def merge_cfg(saved):
 BACKUP_KIND = "ServiceSPL settings backup"
 
 
+class ElideLabel(QtWidgets.QLabel):
+    """One-line label that shrinks with "…" instead of pushing its neighbours off the row.
+    The full text is in the tooltip."""
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text.strip())
+        self.updateGeometry(); self.update()
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        return QtCore.QSize(fm.horizontalAdvance(self.text()) + 4, max(fm.height() + 4, 22))
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, self.sizeHint().height())
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        r = self.contentsRect()
+        t = self.fontMetrics().elidedText(self.text(), QtCore.Qt.ElideRight, r.width())
+        self.style().drawItemText(p, r, int(self.alignment()) | QtCore.Qt.AlignVCenter, self.palette(), self.isEnabled(),
+                                  t, QtGui.QPalette.WindowText)
+
+
+class StatusLine(ElideLabel):
+    """The status messages, living on the bottom toolbar row (instead of a separate status bar).
+    Same calls as QStatusBar: showMessage(text, timeout_ms), currentMessage(), clearMessage()."""
+    def __init__(self):
+        super().__init__("")
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.setStyleSheet(f"color:{T['dim']}; background:transparent; padding-left:6px;")
+        self._timer = QtCore.QTimer(self); self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.clearMessage)
+
+    def sizeHint(self):
+        return QtCore.QSize(0, super().sizeHint().height())
+
+    def showMessage(self, text, timeout=0):
+        self.setText(text)
+        if timeout:
+            self._timer.start(timeout)
+        else:
+            self._timer.stop()
+
+    def currentMessage(self):
+        return self.text()
+
+    def clearMessage(self):
+        self.setText("")
+
+
 class CornerGrip(QtWidgets.QWidget):
     """Bottom-right corner handle that resizes the main window (macOS hides Qt's own size grip, and the native
     window edge is only a couple of pixels wide)."""
@@ -5542,11 +5596,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.out_bar.add(key, w)
         bottom.addWidget(self.out_bar)
         self.outputs_bar = bottom
-        self.cal_lbl = QtWidgets.QLabel()
-        self.status = self.statusBar()
-        self.status.addPermanentWidget(self.cal_lbl)
-        self.status.setSizeGripEnabled(False)          # our own grip works on macOS too
-        self.status.addPermanentWidget(CornerGrip(self))
+        # status messages + calibration state ride on the bottom toolbar row (no separate status bar line)
+        self.cal_lbl = ElideLabel()
+        self.status = StatusLine()
+        self.corner_grip = CornerGrip(self)      # our own grip works on macOS too
         # a 5 px strip just inside the left / right / bottom edges that resizes the window, so you don't have to
         # find macOS's hairline-thin edge
         self.setContentsMargins(5, 0, 5, 5)
@@ -5623,10 +5676,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tools.addWidget(self.tool_bar)
         self.out_lbl = out_lbl
         self.tools_bar = tools
-        bottom_spacer = QtWidgets.QWidget()
-        bottom_spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        self.outputs_bar.addWidget(bottom_spacer)
+        self.outputs_bar.addWidget(self.status)         # expands into the free space, "…" when tight
+        self.cal_lbl_act = self.outputs_bar.addWidget(self.cal_lbl)
         self.outputs_bar.addWidget(self.pop_bar)
+        grip_box = QtWidgets.QWidget(); gl = QtWidgets.QVBoxLayout(grip_box)
+        gl.setContentsMargins(4, 0, 0, 0); gl.addStretch(); gl.addWidget(self.corner_grip)
+        self.outputs_bar.addWidget(grip_box)
         self.bars = (self.top_bar, self.tool_bar, self.out_bar, self.pop_bar)
         order = self.cfg.get("bar_order") or {}
         for bar in self.bars:
@@ -5705,9 +5760,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 b.lay.invalidate()
             return self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
         lbl_w = self.out_lbl.sizeHint().width()
+        cal_w = min(self.cal_lbl.sizeHint().width(), max(48, int(w * 0.22)))   # calibration state: "…" if long
+        self.cal_lbl.setFixedWidth(cal_w)
+        pad += cal_w + 30                            # + the corner grip
         self.set_bottom_compact(False)
         one_out, one_pop = widths()
-        show_lbl = one_out + one_pop + lbl_w <= w - pad - 12
+        show_lbl = one_out + one_pop + lbl_w <= w - pad - 12 - 160   # keep room for the status text
         if not show_lbl and one_out + one_pop > w - pad - 12:
             self.set_bottom_compact(True)
             one_out, one_pop = widths()
