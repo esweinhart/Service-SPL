@@ -27,7 +27,7 @@ needed) and on Windows.
 - **Dosimeter** and **Planning Center** open as pop-up cards over the dashboard (drag the title to move, corner to
   resize, ✕ to close). They never leave the main window and reopen where you left them. Their buttons sit on the
   right of the bottom bar
-- Toolbar buttons can be **dragged into your own order**: click the **🔒** (end of the second row) to unlock, drag,
+- Toolbar buttons can be **dragged into your own order**: click the **🔒** (end of the top row) to unlock, drag,
   click again to lock. Dividers drag just like buttons while unlocked. Right-click a toolbar any time to **add a
   divider**, or right-click a divider to **remove** it (dragging one off the bar removes it too)
 - **Mini**, **Web view** and **NDI** sit on the left of the bottom bar

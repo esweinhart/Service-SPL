@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.2.3"
+APP_VERSION = "2.2.4"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -5638,12 +5638,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.cfg.get("dock_state"):
             QtCore.QTimer.singleShot(0, self.default_dock_sizes)
 
-        # second row: one button per panel (same as the View menu). Unlock 🔒 to drag them into a new order.
+        # panel buttons (same as the View menu), on the top row. Unlock 🔒 to drag them into a new order.
         self.addToolBarBreak()
         tools = QtWidgets.QToolBar("Tools"); tools.setObjectName("tools_bar"); tools.setMovable(False)
         self.addToolBar(tools)
         self.tool_actions = {}
-        self.tool_bar = ReorderBar("tools")
+        # one top row: the panel / window buttons join the main bar (unlock 🔒 to rearrange them)
+        self.tool_bar = self.top_bar
+        self.top_bar.divider("div_tools")
         self.pop_bar = ReorderBar("popups")     # pop-up cards: right side of the bottom bar
         for name, short in (("rta", "RTA 1/3 oct"), ("div_rta", None), ("spectro", "Spectrogram"),
                             ("session", "Session"), ("div_view", None), ("dose", "Dosimeter"),
@@ -5673,7 +5675,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lock_btn.setStyleSheet("QPushButton#lockbtn { padding:5px 9px; font-size:12pt; }")
         self.lock_btn.clicked.connect(lambda on: self.set_bars_locked(not on))
         self.tool_bar.set_tail(self.lock_btn)   # rides at the end of the row and wraps with the buttons
-        tools.addWidget(self.tool_bar)
+        tools.hide()                             # kept (empty) only so older saved window layouts still restore
+        tools.toggleViewAction().setVisible(False)
         self.out_lbl = out_lbl
         self.tools_bar = tools
         self.outputs_bar.addWidget(self.status)         # expands into the free space, "…" when tight
@@ -5682,8 +5685,10 @@ class MainWindow(QtWidgets.QMainWindow):
         grip_box = QtWidgets.QWidget(); gl = QtWidgets.QVBoxLayout(grip_box)
         gl.setContentsMargins(4, 0, 0, 0); gl.addStretch(); gl.addWidget(self.corner_grip)
         self.outputs_bar.addWidget(grip_box)
-        self.bars = (self.top_bar, self.tool_bar, self.out_bar, self.pop_bar)
-        order = self.cfg.get("bar_order") or {}
+        self.bars = (self.top_bar, self.out_bar, self.pop_bar)
+        order = dict(self.cfg.get("bar_order") or {})
+        if order.get("top") and "rta" not in order["top"]:   # saved by 2.2.3 or older (two rows): join them
+            order["top"] = order["top"] + ["div_tools"] + (order.pop("tools", None) or [])
         for bar in self.bars:
             bar.defaults = bar.order()               # for "Reset toolbar button order"
             bar.apply_order(order.get(bar.name))
@@ -5963,8 +5968,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # toolbars always on their own rows, whatever an older saved layout says
         main_tb = self.findChild(QtWidgets.QToolBar, "toolbar")
         self.addToolBar(QtCore.Qt.TopToolBarArea, main_tb)
-        self.addToolBarBreak(QtCore.Qt.TopToolBarArea)
         self.addToolBar(QtCore.Qt.TopToolBarArea, self.tools_bar)
+        self.tools_bar.hide()
         self.addToolBar(QtCore.Qt.BottomToolBarArea, self.outputs_bar)
         for d in self.docks.values():          # panels that were floating in 2.0 come back inside the window
             if d.isFloating():
