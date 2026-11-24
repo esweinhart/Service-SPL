@@ -667,6 +667,18 @@ def _check_svg():
     return path.replace("\\", "/")
 
 
+def rec_icon(on):
+    """A big round REC dot for the Log button: red with a dark ring when idle, bright red with a white ring when
+    recording."""
+    pm = QtGui.QPixmap(64, 64); pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm); p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setPen(QtGui.QPen(QtGui.QColor("#ffffff" if on else "#000000"), 5 if on else 3))
+    p.setBrush(QtGui.QColor("#ff2d2d" if on else "#d93636"))
+    p.drawEllipse(QtCore.QRectF(5, 5, 54, 54))
+    p.end()
+    return QtGui.QIcon(pm)
+
+
 def style_sheet():
     tick = _check_svg()
     return f"""
@@ -4332,7 +4344,7 @@ Press <b>M</b> (or ◆ Marker) to drop markers like “sermon” or “band in�
 <p>Reset the dose at the start of a shift or call time. It survives Stop/Start. Guidance only, not a certified dosimeter.</p>"""),
     ("Room EQ", "__EQ__"),
     ("Logging & reports", """<h2>Logging, schedules and reports</h2>
-<ul><li><b>● Log</b> writes a CSV every 1 s / 10 s / 1 min with Leq, max, peak, LA10/90, dose, markers and the current
+<ul><li><b>⏺ Log</b> writes a CSV every 1 s / 10 s / 1 min with Leq, max, peak, LA10/90, dose, markers and the current
 Planning Center item.</li>
 <li><b>Schedule…</b> (Session panel) starts and stops logging by itself, e.g. every Sunday 8:30 AM – 12:30 PM. Each item has a 🗑 button to remove it.</li>
 <li><b>Auto-save folder</b> (Settings → Logging): point it at your OneDrive folder. Logs, the session CSV and the PDF
@@ -5478,7 +5490,8 @@ class MainWindow(QtWidgets.QMainWindow):
         cal = QtWidgets.QPushButton("Calibrate…"); cal.clicked.connect(self.calibrate)
         rst = QtWidgets.QPushButton("Reset"); rst.setToolTip("Reset Leq / Max / Peak / Ln (not the dose or session)")
         rst.clicked.connect(self.reset_stats)
-        self.log_btn = QtWidgets.QPushButton("●  Log"); self.log_btn.setObjectName("log")
+        self.log_btn = QtWidgets.QPushButton(" Log"); self.log_btn.setObjectName("log")
+        self.log_btn.setIcon(rec_icon(False)); self.log_btn.setIconSize(QtCore.QSize(20, 20))
         self.log_btn.setCheckable(True); self.log_btn.clicked.connect(self.toggle_log)
         red = QtWidgets.QWidget()
         rl = QtWidgets.QHBoxLayout(red); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(2)
@@ -6330,7 +6343,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.pending_notes = []
                 self.log_path = path
                 self.log_started = time.time()
-                self.log_btn.setText("●  Logging")
+                self.log_btn.setText(" Logging"); self.log_btn.setIcon(rec_icon(True))
             except Exception as e:
                 self.log_btn.setChecked(False)
                 message(self, "error", APP_NAME, f"Could not start log:\n{e}")
@@ -6340,7 +6353,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.status.showMessage(f"Saved {self.log_rows} rows to {self.log_path}")
             was = self.log_writer is not None
             self.log_file = self.log_writer = None
-            self.log_btn.setText("●  Log")
+            self.log_btn.setText(" Log"); self.log_btn.setIcon(rec_icon(False))
             if self.sched_key and not self._sched_stopping:      # stopped by hand inside a schedule window
                 self.sched_skip.add(self.sched_key)
                 self.sched_key = None
