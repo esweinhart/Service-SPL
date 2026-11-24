@@ -825,7 +825,7 @@ GLOSSARY = {
     "dBC Slow": "Measured C-weighted with Slow response, as the cinema calibration standard (SMPTE RP 200) calls for.",
     "Mic profile": "A <b>mic profile</b> stores a microphone's calibration offset and its frequency-response "
                    "file (for example a miniDSP UMIK .txt). That way readings are correct for that mic. Use "
-                   "Calibrate… to make one.",
+                   "Settings → Meter → Calibration wizard… to make one.",
     "Long window": "The window used by the long LAeq / LCeq and by L10 / L90. 15 minutes is common for "
                    "worship and live sound, and 60 minutes for venue noise limits.",
 }
@@ -4314,7 +4314,7 @@ GUIDE_PAGES = [
 hidden from the <b>View</b> menu. The layout is remembered. Click <b>🔒</b> at the end of the panel buttons to unlock
 them, drag the buttons into the order you like, then lock them again.</p>"""),
     ("Calibrate your mic", """<h2>Calibrate your mic</h2>
-<p>Each mic gets a <b>profile</b>. Run <b>Calibrate…</b> and pick one of three ways:</p>
+<p>Each mic gets a <b>profile</b>. Open <b>Settings → Meter → Calibration wizard…</b> (or Tools → Calibration wizard…) and pick one of three ways:</p>
 <ul><li><b>Acoustic calibrator</b> (best): put a 94 or 114 dB calibrator on the mic, wait for “steady”, press Measure.</li>
 <li><b>Cal file</b>: load the UMIK-1/UMIK-2 file from miniDSP (enter your serial number on their site). This fixes the
 frequency response and, with the Mac's input volume for the mic at 100 %, sets the level from the Sens Factor.
@@ -4885,6 +4885,12 @@ class SettingsDialog(QtWidgets.QDialog):
         f.addRow("Turn red / thumbs down at (dB)", self.alarm)
         f.addRow("Thumb / color follows", self.src)
         f.addRow("Long Leq window", with_tip(self.long, "Long window"))
+        main = parent if hasattr(parent, "calibrate") else None
+        if main is not None:          # calibration lives here (and in the Tools menu), not on the toolbar
+            cal = QtWidgets.QPushButton("Calibration wizard…"); cal.clicked.connect(main.calibrate)
+            pink = QtWidgets.QPushButton("Pink noise + reference meter…"); pink.clicked.connect(main.calibrate_pink)
+            cal.setToolTip("Calibrate a mic profile: acoustic calibrator, cal file, numbers by hand or pink noise")
+            f.addRow("Mic calibration", h_group(cal, pink))
 
         # --- display
         f = page("Display")
@@ -5487,7 +5493,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prof_cb.setMinimumContentsLength(10)
         self.prof_cb.setToolTip(GLOSSARY["Mic profile"])
         self.prof_cb.activated.connect(lambda i: self.set_profile(self.prof_cb.itemText(i)))
-        cal = QtWidgets.QPushButton("Calibrate…"); cal.clicked.connect(self.calibrate)
         rst = QtWidgets.QPushButton("Reset"); rst.setToolTip("Reset Leq / Max / Peak / Ln (not the dose or session)")
         rst.clicked.connect(self.reset_stats)
         self.log_btn = QtWidgets.QPushButton(" Log"); self.log_btn.setObjectName("log")
@@ -5507,7 +5512,7 @@ class MainWindow(QtWidgets.QMainWindow):
         st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
         self.top_bar = ReorderBar("top")
         for key, w in (("input", self.dev), ("channel", self.ch), ("start", self.run_btn), ("profile", self.prof_cb),
-                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
+                       ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
             self.top_bar.add(key, w)
         self.top_bar.divider("div_top1")
         self.top_bar.add("red_at", red)

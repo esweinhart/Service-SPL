@@ -68,7 +68,7 @@ python spl_monitor.py
 ## 2. First run in 60 seconds
 1. Pick your mic in the input menu on the toolbar. A UMIK / UMM-6 / EMM-6 is picked automatically, then a Scarlett.
 2. Press **▶ Start**.
-3. Press **Calibrate…** and follow the wizard (next section).
+3. Open **Settings → Meter → Calibration wizard…** (or Tools → Calibration wizard…) and follow the wizard (next section).
 4. Set **Red at** to your house limit. The reading turns yellow 5 dB before it and red at it, and the thumb flips down.
 5. **Help → Guide…** any time for step-by-step help.
 
@@ -82,7 +82,7 @@ Every mic gets its own **profile** (toolbar menu next to Calibrate). Switch mics
 it. Tick *"pick this profile automatically when this input device is selected"* in the wizard and it switches by
 itself.
 
-**Calibrate…** offers three methods:
+The **Calibration wizard** (Settings → Meter) offers these methods:
 
 | Method | When | What happens |
 |---|---|---|
@@ -118,7 +118,7 @@ itself.
 - A cal file plus a quick calibrator check afterwards is the gold standard.
 
 **Audix TM1 (and other analog mics)**
-- In Calibrate…, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
+- In the Calibration wizard, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
   sensitivity are read from it, and the profile is named after the mic (e.g. "TM1 #210345").
 - Analog mics have no Sens Factor, because the level depends on your preamp gain. So the file fixes the *frequency
   response*, and then you set the *absolute level* with the **acoustic calibrator** or the pink noise
@@ -335,7 +335,7 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 | Reads 20–30 dB, doesn't move | macOS is giving the app silence: System Settings → Privacy & Security → Microphone → ServiceSPL on. Then quit and reopen. (The rename means macOS asks for the mic once more.) |
 | "ServiceSPL can't be opened" | Right-click → Open → Open, or Privacy & Security → Open Anyway. |
 | Levels way off with a UMIK cal file | Input volume must be 100 % in Audio MIDI Setup, and use the right file (0° vs 90°). Check with a calibrator. |
-| NOT CALIBRATED in the status bar | Run Calibrate… for the active profile, or pick the right profile in the toolbar. |
+| NOT CALIBRATED in the status bar | Run the Calibration wizard (Settings → Meter) for the active profile, or pick the right profile in the toolbar. |
 | "dropouts" in the status bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
 | No menu-bar number | Settings → Display → menu-bar box. (If the Mac build lacks the Cocoa bridge, a colored icon is shown instead.) |
 | Companion button doesn't change | Create the custom variables first (including `spl_d1`…`spl_d4` if you use them); check OSC is enabled in Companion and the IP/port match; for *Paint this button*, use page/row/column like `1/0/0`. |
