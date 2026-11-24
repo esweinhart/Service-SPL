@@ -28,8 +28,8 @@ needed) and on Windows.
   resize, ✕ to close). They never leave the main window and reopen where you left them. Their buttons sit on the
   right of the bottom bar
 - Toolbar buttons can be **dragged into your own order**: click the **🔒** (end of the second row) to unlock, drag,
-  click again to lock. While unlocked, right-click a toolbar to **add a divider**, right-click a divider (or drag it
-  off the bar) to **remove** it
+  click again to lock. Dividers drag just like buttons while unlocked. Right-click a toolbar any time to **add a
+  divider**, or right-click a divider to **remove** it (dragging one off the bar removes it too)
 - **Mini**, **Web view** and **NDI** sit on the left of the bottom bar
 - Drag the thin lines between the meter and the panels (they light up on hover) to resize them
 - **Help → Keyboard shortcuts…** (⌘/): ⌘R start/stop, ⌘L log, ⌘⇧R reset, M / ⇧M marker, ⌘E CSV, ⌘P PDF,
@@ -68,7 +68,7 @@ python spl_monitor.py
 ## 2. First run in 60 seconds
 1. Pick your mic in the input menu on the toolbar. A UMIK / UMM-6 / EMM-6 is picked automatically, then a Scarlett.
 2. Press **▶ Start**.
-3. Press **Calibrate…** and follow the wizard (next section).
+3. Open **Settings → Meter → Calibration wizard…** (or Tools → Calibration wizard…) and follow the wizard (next section).
 4. Set **Red at** to your house limit. The reading turns yellow 5 dB before it and red at it, and the thumb flips down.
 5. **Help → Guide…** any time for step-by-step help.
 
@@ -82,7 +82,7 @@ Every mic gets its own **profile** (toolbar menu next to Calibrate). Switch mics
 it. Tick *"pick this profile automatically when this input device is selected"* in the wizard and it switches by
 itself.
 
-**Calibrate…** offers three methods:
+The **Calibration wizard** (Settings → Meter) offers these methods:
 
 | Method | When | What happens |
 |---|---|---|
@@ -118,7 +118,7 @@ itself.
 - A cal file plus a quick calibrator check afterwards is the gold standard.
 
 **Audix TM1 (and other analog mics)**
-- In Calibrate…, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
+- In the Calibration wizard, choose **Mic calibration file** and pick the TM1's file. The serial number, model and the mV/Pa
   sensitivity are read from it, and the profile is named after the mic (e.g. "TM1 #210345").
 - Analog mics have no Sens Factor, because the level depends on your preamp gain. So the file fixes the *frequency
   response*, and then you set the *absolute level* with the **acoustic calibrator** or the pink noise
@@ -130,7 +130,7 @@ itself.
 3 to 10 dB. The big number's title (e.g. **LAS · A-weighted · Slow**) tells you what you're looking at, and the
 wizard's last page shows the reading in the dashboard's weighting with LAS / LCS / LZF underneath.
 
-After any gain change on an analog mic/interface, **recalibrate**. The status bar shows the active profile, how it was
+After any gain change on an analog mic/interface, **recalibrate**. The bottom bar shows the active profile, how it was
 calibrated, and turns yellow when the calibration is more than 30 days old.
 
 ---
@@ -260,13 +260,19 @@ The menu bar shows `● 87.3` with the dot in green / yellow / red. Click it for
 **Mini ⤡** shrinks to a small box with the thumb and the number. 📌 keeps it on top, ⤢ or double-click goes back.
 
 ### Bitfocus Companion (Stream Deck)
-1. In Companion, create custom variables: `spl_level`, `spl_leq1m`, `spl_leqlong`, `spl_peak`, `spl_dose`,
-   `spl_state`, `spl_color`, `spl_item`. Make sure OSC is enabled in Companion (default port **12321**).
-2. In ServiceSPL: Settings → Integrations → tick **Send levels to Bitfocus Companion**, set the Companion computer's IP
-   (127.0.0.1 if it's the same Mac).
-3. Put `$(custom:spl_level)` on a button. `spl_state` is `good` / `warn` / `bad` for feedback rules, `spl_color` is
-   the hex color.
-4. Or the zero-setup way: Settings → Integrations → **Button location**, a page/row/column like `1/0/0`, and pick
+Also in the app: **Help → Guide → Stream Deck (Companion)**.
+
+1. Install **Bitfocus Companion** and press **Launch GUI**.
+2. Companion **Settings** → OSC: enable the **OSC Listener** on port **12321**.
+3. Companion **Variables → Custom Variables**: add `spl_level`, `spl_leq1m`, `spl_leqlong`, `spl_peak`, `spl_dose`,
+   `spl_state`, `spl_color`, `spl_item` (plus `spl_d1` … `spl_d4` if you build your own big-number layout).
+   `spl_state` is `good` / `warn` / `bad` for feedback rules, `spl_color` is the hex color.
+4. ServiceSPL: Settings → Integrations → tick **Send levels to Bitfocus Companion (OSC)**, set the Companion computer
+   to `127.0.0.1` (or the Companion machine's IP) and the port to `12321`.
+5. Put `$(custom:spl_level)` on a button with text size **Auto**. Test with Companion's **Emulator**, no Stream Deck
+   needed: press Start in ServiceSPL and watch the button update.
+
+6. Or the zero-setup way: Settings → Integrations → **Button location**, a page/row/column like `1/0/0`, and pick
    **Paint button(s)**:
    - **One button**: that button shows the level + weighting (e.g. `87.3` / `LAS`) and turns green / yellow / red.
    - **Four buttons in a row**: that button and the 3 to its right show the reading big, one piece per key:
@@ -275,6 +281,9 @@ The menu bar shows `● 87.3` with the dot in green / yellow / red. Click it for
 
    ServiceSPL updates them 4 times a second. Building your own layout instead? The 4 pieces are also in the custom
    variables `spl_d1` … `spl_d4` (create them first).
+
+Good to know: the ports must match; many apps can send to Companion's port but only one app per computer can listen
+on it; across machines, allow UDP 12321 through the firewall.
 
 Prefer polling? With **Web view** on, `http://<mac-ip>:8080/api/json` returns all values as JSON and
 `/api/level` returns just the number.
@@ -326,8 +335,8 @@ NDI needs the free **NDI Tools** (or NDI runtime) installed on the computer: htt
 | Reads 20–30 dB, doesn't move | macOS is giving the app silence: System Settings → Privacy & Security → Microphone → ServiceSPL on. Then quit and reopen. (The rename means macOS asks for the mic once more.) |
 | "ServiceSPL can't be opened" | Right-click → Open → Open, or Privacy & Security → Open Anyway. |
 | Levels way off with a UMIK cal file | Input volume must be 100 % in Audio MIDI Setup, and use the right file (0° vs 90°). Check with a calibrator. |
-| NOT CALIBRATED in the status bar | Run Calibrate… for the active profile, or pick the right profile in the toolbar. |
-| "dropouts" in the status bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
+| NOT CALIBRATED in the bottom bar | Run the Calibration wizard (Settings → Meter) for the active profile, or pick the right profile in the toolbar. |
+| "dropouts" in the bottom bar | The computer couldn't keep up or the USB mic hiccupped. Close heavy apps; try another USB port. |
 | No menu-bar number | Settings → Display → menu-bar box. (If the Mac build lacks the Cocoa bridge, a colored icon is shown instead.) |
 | Companion button doesn't change | Create the custom variables first (including `spl_d1`…`spl_d4` if you use them); check OSC is enabled in Companion and the IP/port match; for *Paint this button*, use page/row/column like `1/0/0`. |
 | NDI button says runtime not found | Install NDI Tools (ndi.video/tools), or browse to `libndi.dylib` in Settings → Integrations. |

@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.2"
+APP_VERSION = "2.2.3"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -625,6 +625,18 @@ class SimSource:
         return [p * env]
 
 
+class TidyScroll(QtWidgets.QScrollArea):
+    """Scroll area that hides a scrollbar when the panel is squashed too small to show a usable one
+    (instead of a clipped stub in the corner)."""
+    MIN = 56
+
+    def resizeEvent(self, e):
+        on, off = QtCore.Qt.ScrollBarAsNeeded, QtCore.Qt.ScrollBarAlwaysOff
+        self.setVerticalScrollBarPolicy(on if e.size().height() >= self.MIN else off)
+        self.setHorizontalScrollBarPolicy(on if e.size().width() >= self.MIN else off)
+        super().resizeEvent(e)
+
+
 # --------------------------------------------------------------- theme ----
 
 PALETTES = {
@@ -640,8 +652,48 @@ PALETTES = {
 T = dict(PALETTES["dark"])
 
 
+def _check_svg():
+    """A white tick for checked check boxes (the style sheet needs an image file)."""
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), "servicespl-check.svg")
+    try:
+        if not os.path.exists(path):
+            with open(path, "w") as fh:
+                fh.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                         '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#ffffff" stroke-width="2.4" '
+                         'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    except OSError:
+        return ""
+    return path.replace("\\", "/")
+
+
+def rec_icon(on):
+    """A big round REC dot for the Log button: red with a dark ring when idle, bright red with a white ring when
+    recording."""
+    pm = QtGui.QPixmap(64, 64); pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm); p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setPen(QtGui.QPen(QtGui.QColor("#ffffff" if on else "#000000"), 5 if on else 3))
+    p.setBrush(QtGui.QColor("#ff2d2d" if on else "#d93636"))
+    p.drawEllipse(QtCore.QRectF(5, 5, 54, 54))
+    p.end()
+    return QtGui.QIcon(pm)
+
+
 def style_sheet():
+    tick = _check_svg()
     return f"""
+QRadioButton, QCheckBox {{ spacing:7px; background:transparent; }}
+QRadioButton::indicator, QCheckBox::indicator {{ width:14px; height:14px; border:2px solid {T['dim']};
+    background:{T['field']}; }}
+QRadioButton::indicator {{ border-radius:9px; }}
+QCheckBox::indicator {{ border-radius:4px; }}
+QRadioButton::indicator:hover, QCheckBox::indicator:hover {{ border-color:{T['accent']}; }}
+QRadioButton::indicator:checked {{ border-color:{T['accent']};
+    background:qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 {T['accent']}, stop:0.55 {T['accent']},
+    stop:0.6 {T['field']}, stop:1 {T['field']}); }}
+QCheckBox::indicator:checked {{ border-color:{T['accent']}; background:{T['accent']}; image:url({tick}); }}
+QRadioButton::indicator:disabled, QCheckBox::indicator:disabled {{ border-color:{T['off']}; }}
+QRadioButton:disabled, QCheckBox:disabled {{ color:{T['dim']}; }}
 QWidget {{ background:{T['bg']}; color:{T['fg']}; font-family:'Segoe UI','Helvetica Neue',Arial; font-size:10pt; }}
 QFrame#tile {{ background:{T['panel']}; border:1px solid {T['border']}; border-radius:6px; }}
 QMainWindow::separator {{ width:9px; height:9px; }}
@@ -651,6 +703,15 @@ QMainWindow::separator:hover {{ background:{T['accent']}; }}
 QSplitter::handle:horizontal {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
 QSplitter::handle:vertical {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {T['bg']}, stop:0.38 {T['bg']}, stop:0.39 {T['btn_border']}, stop:0.61 {T['btn_border']}, stop:0.62 {T['bg']}, stop:1 {T['bg']}); }}
 QSplitter::handle:hover {{ background:{T['accent']}; }}
+QScrollBar:vertical {{ background:{T['track']}; width:14px; margin:2px 1px; border:1px solid {T['border']}; border-radius:5px; }}
+QScrollBar:horizontal {{ background:{T['track']}; height:14px; margin:1px 2px; border:1px solid {T['border']}; border-radius:5px; }}
+QScrollBar::handle:vertical {{ background:{T['dim']}; min-height:28px; margin:1px 2px; border-radius:4px; }}
+QScrollBar::handle:horizontal {{ background:{T['dim']}; min-width:28px; margin:2px 1px; border-radius:4px; }}
+QScrollBar::handle:hover {{ background:{T['accent']}; }}
+QScrollBar::handle:pressed {{ background:{T['green']}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width:0; height:0; border:none; background:none; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background:none; }}
+QAbstractScrollArea::corner {{ background:{T['bg']}; border:none; }}
 QFrame#tile QLabel {{ background:transparent; }}
 QPushButton, QToolButton {{ background:{T['btn']}; border:1px solid {T['btn_border']}; border-radius:4px; padding:5px 12px; }}
 QPushButton:hover, QToolButton:hover {{ background:{T['hover']}; }}
@@ -764,7 +825,7 @@ GLOSSARY = {
     "dBC Slow": "Measured C-weighted with Slow response, as the cinema calibration standard (SMPTE RP 200) calls for.",
     "Mic profile": "A <b>mic profile</b> stores a microphone's calibration offset and its frequency-response "
                    "file (for example a miniDSP UMIK .txt). That way readings are correct for that mic. Use "
-                   "Calibrate… to make one.",
+                   "Settings → Meter → Calibration wizard… to make one.",
     "Long window": "The window used by the long LAeq / LCeq and by L10 / L90. 15 minutes is common for "
                    "worship and live sound, and 60 minutes for venue noise limits.",
 }
@@ -950,6 +1011,9 @@ def exec_in_window(dlg):
     parent, flags = dlg.parentWidget(), dlg.windowFlags()
     cover = DialogCover(host, dlg)
     dlg.setWindowFlags(QtCore.Qt.Widget)
+    lay = dlg.layout()
+    if lay is not None:        # never squash the fields below their normal size: the card scrolls instead
+        dlg.setMinimumSize(dlg.minimumSize().expandedTo(lay.totalMinimumSize()))
     cover.scroll.setWidget(dlg)
     cover.place()
     cover.show(); cover.raise_()
@@ -1294,20 +1358,45 @@ class ReorderBar(QtWidgets.QWidget):
         w.setProperty("bar_key", key)
         self.items[key] = w
         self.lay.addWidget(w)
+        t = getattr(self, "tail", None)               # the lock button stays at the end
+        if t is not None:
+            self.lay.removeWidget(t)
+            self.lay.addWidget(t)
         w.installEventFilter(self)
         for c in w.findChildren(QtWidgets.QWidget):
             c.installEventFilter(self)
         return w
 
     def divider(self, key):
-        f = QtWidgets.QFrame(); f.setFrameShape(QtWidgets.QFrame.VLine)
-        f.setFixedWidth(14); f.setObjectName("bardiv")
-        f.setStyleSheet(f"QFrame#bardiv {{ color:{T['btn_border']}; border:none; "
-                        f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
-                        f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
-                        "margin:3px 0; }")
-        f.setToolTip("Divider. Unlocked: drag it to move, drag it off the bar or right-click to remove.")
+        f = QtWidgets.QFrame(); f.setFrameShape(QtWidgets.QFrame.NoFrame)
+        f.setObjectName("bardiv")
+        f.setToolTip("Divider. Right-click to add or remove dividers. Unlock 🔓 to drag it "
+                     "(drag it off the bar to remove it).")
+        h = QtWidgets.QHBoxLayout(f); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
+        grip = QtWidgets.QLabel("⋮", f)               # grip dots while unlocked; dragging it drags the divider
+        grip.setAlignment(QtCore.Qt.AlignCenter)
+        grip.setStyleSheet(f"QLabel {{ background:transparent; border:none; color:{T['accent']}; "
+                           "font-size:12pt; font-weight:700; }")
+        grip.hide()
+        h.addWidget(grip)
+        f._grip = grip
+        self._style_divider(f, True)
         return self.add(key, f)
+
+    def _style_divider(self, f, locked):
+        """Locked: a thin line. Unlocked: a wider dashed handle with a ✕, easy to grab or remove."""
+        f.setFixedHeight(28)       # as tall as the buttons, so it's easy to right-click or grab
+        if locked:
+            f.setFixedWidth(14)
+            f.setStyleSheet(f"QFrame#bardiv {{ border:none; "
+                            f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0.45 transparent, "
+                            f"stop:0.46 {T['btn_border']}, stop:0.54 {T['btn_border']}, stop:0.55 transparent); "
+                            "margin:3px 0; }")
+        else:
+            f.setFixedWidth(26)
+            f.setStyleSheet(f"QFrame#bardiv {{ border:1px dashed {T['accent']}; border-radius:4px; "
+                            f"background:{T['btn']}; margin:2px 0; }}")
+        f._grip.setVisible(not locked)
 
     def sizeHint(self):
         one = self.lay.sizeHint()
@@ -1364,9 +1453,8 @@ class ReorderBar(QtWidgets.QWidget):
         self.changed.emit(keys)
 
     def contextMenuEvent(self, ev):
-        if self.locked:
-            return super().contextMenuEvent(ev)
-        pos = QtCore.QPointF(self.mapFromGlobal(ev.globalPos()))
+        """Right-click (locked or not): add a divider where you clicked, or remove the one under the pointer."""
+        pos = QtCore.QPointF(ev.pos())            # Qt maps this into our coordinates when a child passes it up
         hit = self._top_item(self.childAt(pos.toPoint()))
         menu = QtWidgets.QMenu(self)
         idx = self._drop_index(pos)
@@ -1380,6 +1468,7 @@ class ReorderBar(QtWidgets.QWidget):
         """A widget that always sits after the reorderable items and can't be dragged (the lock button)."""
         self.tail = w
         self.lay.addWidget(w)
+        self.lay.removeWidget(w); self.lay.addWidget(w)
 
     def apply_order(self, keys):
         if not keys:
@@ -1396,12 +1485,17 @@ class ReorderBar(QtWidgets.QWidget):
             w = self.items[k]
             self.lay.removeWidget(w)
             self.lay.addWidget(w)
-        if getattr(self, "tail", None) is not None:
-            self.lay.removeWidget(self.tail)
-            self.lay.addWidget(self.tail)
+        t = getattr(self, "tail", None)                  # the lock button always rides at the end
+        if t is not None:
+            self.lay.removeWidget(t)
+            self.lay.addWidget(t)
 
     def set_locked(self, locked):
         self.locked = locked
+        for w in self.items.values():
+            if hasattr(w, "_grip"):
+                self._style_divider(w, locked)
+        self.updateGeometry()
         for w in self.items.values():
             w.setCursor(QtCore.Qt.ArrowCursor if locked else QtCore.Qt.OpenHandCursor)
             for c in w.findChildren(QtWidgets.QWidget):
@@ -4220,7 +4314,7 @@ GUIDE_PAGES = [
 hidden from the <b>View</b> menu. The layout is remembered. Click <b>🔒</b> at the end of the panel buttons to unlock
 them, drag the buttons into the order you like, then lock them again.</p>"""),
     ("Calibrate your mic", """<h2>Calibrate your mic</h2>
-<p>Each mic gets a <b>profile</b>. Run <b>Calibrate…</b> and pick one of three ways:</p>
+<p>Each mic gets a <b>profile</b>. Open <b>Settings → Meter → Calibration wizard…</b> (or Tools → Calibration wizard…) and pick one of three ways:</p>
 <ul><li><b>Acoustic calibrator</b> (best): put a 94 or 114 dB calibrator on the mic, wait for “steady”, press Measure.</li>
 <li><b>Cal file</b>: load the UMIK-1/UMIK-2 file from miniDSP (enter your serial number on their site). This fixes the
 frequency response and, with the Mac's input volume for the mic at 100 %, sets the level from the Sens Factor.
@@ -4250,19 +4344,52 @@ Press <b>M</b> (or ◆ Marker) to drop markers like “sermon” or “band in�
 <p>Reset the dose at the start of a shift or call time. It survives Stop/Start. Guidance only, not a certified dosimeter.</p>"""),
     ("Room EQ", "__EQ__"),
     ("Logging & reports", """<h2>Logging, schedules and reports</h2>
-<ul><li><b>● Log</b> writes a CSV every 1 s / 10 s / 1 min with Leq, max, peak, LA10/90, dose, markers and the current
+<ul><li><b>⏺ Log</b> writes a CSV every 1 s / 10 s / 1 min with Leq, max, peak, LA10/90, dose, markers and the current
 Planning Center item.</li>
 <li><b>Schedule…</b> (Session panel) starts and stops logging by itself, e.g. every Sunday 8:30 AM – 12:30 PM. Each item has a 🗑 button to remove it.</li>
 <li><b>Auto-save folder</b> (Settings → Logging): point it at your OneDrive folder. Logs, the session CSV and the PDF
 report are saved there in dated folders (YYYY / YYYY-MM-DD - plan) and OneDrive syncs them.</li>
 <li><b>PDF report</b>: summary, time history, markers, alarms and per-item levels for the service.</li></ul>"""),
-    ("Companion, NDI & web", """<h2>Stream Deck (Companion), NDI and web view</h2>
-<ul><li><b>Companion</b>: enable it in Settings → Integrations. ServiceSPL sends OSC to Companion (port 12321) and sets
-custom variables <code>spl_level</code>, <code>spl_leq1m</code>, <code>spl_leqlong</code>, <code>spl_peak</code>,
-<code>spl_dose</code>, <code>spl_state</code>, <code>spl_color</code>, <code>spl_item</code>. Create those custom variables
-in Companion, then use <code>$(custom:spl_level)</code> on a button. Or give a button location (page/row/column) and
-ServiceSPL paints that button's text and color directly.</li>
-<li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “ServiceSPL” for your
+    ("Stream Deck (Companion)", """<h2>Stream Deck with Bitfocus Companion: setup and test</h2>
+<p>ServiceSPL sends the live level to Companion over OSC 4 times a second. About 5 minutes, and you can test it all
+without a Stream Deck plugged in.</p>
+<h3>1 · Install Companion</h3>
+<ol><li>Download and install <b>Bitfocus Companion</b> (free, bitfocus.io/companion).</li>
+<li>Start it and press <b>Launch GUI</b>. The Companion admin page opens in your browser.</li></ol>
+<h3>2 · Turn on Companion's OSC listener</h3>
+<ol><li>In the Companion admin page open <b>Settings</b> and find the <b>OSC</b> section (under Protocols).</li>
+<li>Enable the <b>OSC Listener</b> and set its port to <b>12321</b> (Companion's default).</li></ol>
+<h3>3 · Create the custom variables</h3>
+<p>In Companion open <b>Variables → Custom Variables</b> and add these (any starting value is fine):</p>
+<ul><li><code>spl_level</code>: the live reading, e.g. <code>87.3</code></li>
+<li><code>spl_leq1m</code> and <code>spl_leqlong</code>: LAeq 1 min and the long average</li>
+<li><code>spl_peak</code>: LCpeak · <code>spl_dose</code>: dose %</li>
+<li><code>spl_state</code>: <code>good</code> / <code>warn</code> / <code>bad</code>, handy for feedback rules</li>
+<li><code>spl_color</code>: the hex colour (green / yellow / red) · <code>spl_item</code>: the Planning Center item</li>
+<li>Optional for your own big-number layout: <code>spl_d1</code>, <code>spl_d2</code>, <code>spl_d3</code>,
+<code>spl_d4</code> (the reading split over 4 keys).</li></ul>
+<h3>4 · Point ServiceSPL at Companion</h3>
+<ol><li>ServiceSPL: <b>Settings → Integrations</b>, tick <b>Send levels to Bitfocus Companion (OSC)</b>.</li>
+<li><b>Companion computer</b>: <code>127.0.0.1</code> if Companion runs on this computer, otherwise that machine's IP.</li>
+<li><b>Companion OSC port</b>: <code>12321</code> (the same port as step 2).</li></ol>
+<h3>5 · Make a button</h3>
+<ul><li><b>Your own button</b>: set its text to <code>$(custom:spl_level)</code> and the text size to <b>Auto</b>.
+Add a feedback on <code>spl_state</code> to colour it.</li>
+<li><b>Let ServiceSPL paint it</b> (no variables needed): in Settings → Integrations set <b>Button location</b> to
+page/row/column, e.g. <code>1/0/0</code>, and pick <b>Paint button(s)</b>:
+<b>One button</b> shows level + weighting and turns green / yellow / red; <b>Four buttons in a row</b> uses that key
+and the 3 to its right for <code>8</code> · <code>7</code> · <code>.3</code> · <code>dBA</code>. Set those keys' text
+size to Auto.</li></ul>
+<h3>6 · Test it without a Stream Deck</h3>
+<p>Press <b>▶ Start</b> in ServiceSPL, then open Companion's <b>Emulator</b> (from the admin page). Your button should
+show the level and change colour live. The custom variables page also shows the values updating.</p>
+<h3>Good to know</h3>
+<ul><li>The port in ServiceSPL and Companion's OSC listener port must match.</li>
+<li>Lots of apps can <i>send</i> to Companion's port at once, but only one app per computer can <i>listen</i> on a
+port, so don't run another OSC listener on 12321 on the Companion machine.</li>
+<li>Companion on another computer? Allow <b>UDP 12321</b> through that computer's firewall.</li></ul>"""),
+    ("NDI & web view", """<h2>NDI and web view</h2>
+<ul><li><b>NDI</b>: the <b>NDI</b> toolbar button sends just the meter graphic as an NDI source named “ServiceSPL” for your
 switcher. Needs the free NDI Tools/runtime installed. Tick “transparent background” for a key-able overlay.</li>
 <li><b>Web view</b>: shows the big number in any browser on the network; <code>/api/json</code> and <code>/api/level</code>
 give the numbers to other software.</li></ul>"""),
@@ -4341,7 +4468,8 @@ class GuideWizard(QtWidgets.QDialog):
     ACTIONS = {"Welcome": "▶ Start the meter", "Calibrate your mic": "Open the calibration wizard…",
                "Monitoring a show": "Show the Session panel", "Hearing dose": "Show the dosimeter",
                "Logging & reports": "Edit the schedule…",
-               "Companion, NDI & web": "Open Settings…", "Planning Center": "Show the Planning Center panel"}
+               "Stream Deck (Companion)": "Open Settings…", "NDI & web view": "Open Settings…",
+               "Planning Center": "Show the Planning Center panel"}
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
@@ -4361,7 +4489,7 @@ class GuideWizard(QtWidgets.QDialog):
             m.docks[key].show(); m.docks[key].raise_()
         elif t == "Logging & reports":
             m.edit_schedule()
-        elif t == "Companion, NDI & web":
+        elif t in ("Stream Deck (Companion)", "NDI & web view"):
             m.settings()
 
     def _eq_page(self):
@@ -4757,6 +4885,12 @@ class SettingsDialog(QtWidgets.QDialog):
         f.addRow("Turn red / thumbs down at (dB)", self.alarm)
         f.addRow("Thumb / color follows", self.src)
         f.addRow("Long Leq window", with_tip(self.long, "Long window"))
+        main = parent if hasattr(parent, "calibrate") else None
+        if main is not None:          # calibration lives here (and in the Tools menu), not on the toolbar
+            cal = QtWidgets.QPushButton("Calibration wizard…"); cal.clicked.connect(main.calibrate)
+            pink = QtWidgets.QPushButton("Pink noise + reference meter…"); pink.clicked.connect(main.calibrate_pink)
+            cal.setToolTip("Calibrate a mic profile: acoustic calibrator, cal file, numbers by hand or pink noise")
+            f.addRow("Mic calibration", h_group(cal, pink))
 
         # --- display
         f = page("Display")
@@ -4989,6 +5123,96 @@ def merge_cfg(saved):
     return cfg
 
 BACKUP_KIND = "ServiceSPL settings backup"
+
+
+class ElideLabel(QtWidgets.QLabel):
+    """One-line label that shrinks with "…" instead of pushing its neighbours off the row.
+    The full text is in the tooltip."""
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text.strip())
+        self.updateGeometry(); self.update()
+
+    def sizeHint(self):
+        fm = self.fontMetrics()
+        return QtCore.QSize(fm.horizontalAdvance(self.text()) + 4, max(fm.height() + 4, 22))
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, self.sizeHint().height())
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        r = self.contentsRect()
+        t = self.fontMetrics().elidedText(self.text(), QtCore.Qt.ElideRight, r.width())
+        self.style().drawItemText(p, r, int(self.alignment()) | QtCore.Qt.AlignVCenter, self.palette(), self.isEnabled(),
+                                  t, QtGui.QPalette.WindowText)
+
+
+class StatusLine(ElideLabel):
+    """The status messages, living on the bottom toolbar row (instead of a separate status bar).
+    Same calls as QStatusBar: showMessage(text, timeout_ms), currentMessage(), clearMessage()."""
+    def __init__(self):
+        super().__init__("")
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.setStyleSheet(f"color:{T['dim']}; background:transparent; padding-left:6px;")
+        self._timer = QtCore.QTimer(self); self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.clearMessage)
+
+    def sizeHint(self):
+        return QtCore.QSize(0, super().sizeHint().height())
+
+    def showMessage(self, text, timeout=0):
+        self.setText(text)
+        if timeout:
+            self._timer.start(timeout)
+        else:
+            self._timer.stop()
+
+    def currentMessage(self):
+        return self.text()
+
+    def clearMessage(self):
+        self.setText("")
+
+
+class CornerGrip(QtWidgets.QWidget):
+    """Bottom-right corner handle that resizes the main window (macOS hides Qt's own size grip, and the native
+    window edge is only a couple of pixels wide)."""
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.setFixedSize(18, 18)
+        self.setCursor(QtCore.Qt.SizeFDiagCursor)
+        self.setToolTip("Drag to resize the window")
+        self._start = None
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.setPen(QtCore.Qt.NoPen); p.setBrush(QtGui.QColor(T["dim"]))
+        for i in range(3):                     # a little triangle of dots, the classic corner grip
+            for j in range(3 - i):
+                p.drawEllipse(QtCore.QPointF(15 - j * 5, 15 - i * 5), 1.4, 1.4)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == QtCore.Qt.LeftButton:
+            self._start = (ev.globalPosition().toPoint(), self.win.size())
+
+    def mouseMoveEvent(self, ev):
+        if self._start:
+            p0, sz = self._start
+            d = ev.globalPosition().toPoint() - p0
+            self.win.resize(max(self.win.minimumSizeHint().width(), sz.width() + d.x()),
+                            max(self.win.minimumSizeHint().height(), sz.height() + d.y()))
+
+    def mouseReleaseEvent(self, ev):
+        self._start = None
+        if hasattr(self.win, "refit_later"):
+            self.win.refit_later(0, 150)
 
 
 class PopupPanel(QtWidgets.QFrame):
@@ -5323,10 +5547,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prof_cb.setMinimumContentsLength(10)
         self.prof_cb.setToolTip(GLOSSARY["Mic profile"])
         self.prof_cb.activated.connect(lambda i: self.set_profile(self.prof_cb.itemText(i)))
-        cal = QtWidgets.QPushButton("Calibrate…"); cal.clicked.connect(self.calibrate)
         rst = QtWidgets.QPushButton("Reset"); rst.setToolTip("Reset Leq / Max / Peak / Ln (not the dose or session)")
         rst.clicked.connect(self.reset_stats)
-        self.log_btn = QtWidgets.QPushButton("●  Log"); self.log_btn.setObjectName("log")
+        self.log_btn = QtWidgets.QPushButton(" Log"); self.log_btn.setObjectName("log")
+        self.log_btn.setIcon(rec_icon(False)); self.log_btn.setIconSize(QtCore.QSize(20, 20))
         self.log_btn.setCheckable(True); self.log_btn.clicked.connect(self.toggle_log)
         red = QtWidgets.QWidget()
         rl = QtWidgets.QHBoxLayout(red); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(2)
@@ -5342,7 +5566,7 @@ class MainWindow(QtWidgets.QMainWindow):
         st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
         self.top_bar = ReorderBar("top")
         for key, w in (("input", self.dev), ("channel", self.ch), ("start", self.run_btn), ("profile", self.prof_cb),
-                       ("calibrate", cal), ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
+                       ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
             self.top_bar.add(key, w)
         self.top_bar.divider("div_top1")
         self.top_bar.add("red_at", red)
@@ -5372,9 +5596,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.out_bar.add(key, w)
         bottom.addWidget(self.out_bar)
         self.outputs_bar = bottom
-        self.cal_lbl = QtWidgets.QLabel()
-        self.status = self.statusBar()
-        self.status.addPermanentWidget(self.cal_lbl)
+        # status messages + calibration state ride on the bottom toolbar row (no separate status bar line)
+        self.cal_lbl = ElideLabel()
+        self.status = StatusLine()
+        self.corner_grip = CornerGrip(self)      # our own grip works on macOS too
+        # a 5 px strip just inside the left / right / bottom edges that resizes the window, so you don't have to
+        # find macOS's hairline-thin edge
+        self.setContentsMargins(5, 0, 5, 5)
+        self.setMouseTracking(True)
+        self._edge_drag = None
 
         self.meter = MeterPanel(self)
         self.setCentralWidget(self.meter)
@@ -5391,7 +5621,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                       QtCore.Qt.BottomDockWidgetArea)):
             d = QtWidgets.QDockWidget(title, self)
             d.setObjectName("dock_" + name)
-            sc = QtWidgets.QScrollArea()          # panels scroll instead of forcing the window bigger
+            sc = TidyScroll()          # panels scroll instead of forcing the window bigger
             sc.setWidgetResizable(True)
             sc.setFrameShape(QtWidgets.QFrame.NoFrame)
             sc.setWidget(w)
@@ -5446,10 +5676,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tools.addWidget(self.tool_bar)
         self.out_lbl = out_lbl
         self.tools_bar = tools
-        bottom_spacer = QtWidgets.QWidget()
-        bottom_spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        self.outputs_bar.addWidget(bottom_spacer)
+        self.outputs_bar.addWidget(self.status)         # expands into the free space, "…" when tight
+        self.cal_lbl_act = self.outputs_bar.addWidget(self.cal_lbl)
         self.outputs_bar.addWidget(self.pop_bar)
+        grip_box = QtWidgets.QWidget(); gl = QtWidgets.QVBoxLayout(grip_box)
+        gl.setContentsMargins(4, 0, 0, 0); gl.addStretch(); gl.addWidget(self.corner_grip)
+        self.outputs_bar.addWidget(grip_box)
         self.bars = (self.top_bar, self.tool_bar, self.out_bar, self.pop_bar)
         order = self.cfg.get("bar_order") or {}
         for bar in self.bars:
@@ -5516,24 +5748,134 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_fit_w", None) == w:
             return
         self._fit_w = w
-        pad = 14 + 2 * self.style().pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
+        st = self.style()          # toolbar margins differ per platform (macOS adds more): leave a little slack
+        pad = 20 + 2 * (st.pixelMetric(QtWidgets.QStyle.PM_ToolBarItemMargin)
+                        + st.pixelMetric(QtWidgets.QStyle.PM_ToolBarFrameWidth)) \
+            + st.pixelMetric(QtWidgets.QStyle.PM_ToolBarItemSpacing)
         self.top_bar.set_avail(w - pad)
         self.tool_bar.set_avail(w - pad)
-        self.out_lbl_act.setVisible(w >= 640)      # narrow window: drop the label, keep the buttons
-        rest = w - pad - (self.out_lbl.sizeHint().width() if w >= 640 else 0) - 12
-        one_out, one_pop = self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
+        # bottom bar stays on one line: first drop the label, then use short names, wrap only as a last resort
+        def widths():
+            for b in (self.out_bar, self.pop_bar):
+                b.lay.invalidate()
+            return self.out_bar.lay.sizeHint().width(), self.pop_bar.lay.sizeHint().width()
+        lbl_w = self.out_lbl.sizeHint().width()
+        cal_w = min(self.cal_lbl.sizeHint().width(), max(48, int(w * 0.22)))   # calibration state: "…" if long
+        self.cal_lbl.setFixedWidth(cal_w)
+        pad += cal_w + 30                            # + the corner grip
+        self.set_bottom_compact(False)
+        one_out, one_pop = widths()
+        show_lbl = one_out + one_pop + lbl_w <= w - pad - 12 - 160   # keep room for the status text
+        if not show_lbl and one_out + one_pop > w - pad - 12:
+            self.set_bottom_compact(True)
+            one_out, one_pop = widths()
+        self.out_lbl_act.setVisible(show_lbl)
+        rest = w - pad - (lbl_w if show_lbl else 0) - 12
         if one_out + one_pop <= rest:
             self.out_bar.set_avail(one_out); self.pop_bar.set_avail(one_pop)
-        else:                                       # share the row so each side wraps evenly
+        else:                                       # tiny window: share the row so each side wraps evenly
             self.out_bar.set_avail(rest // 2); self.pop_bar.set_avail(rest - rest // 2)
+
+    BOTTOM_SHORT = {"mini": ("Mini ⤡", "Mini"), "web": ("Web view", "Web"), "ndi": ("NDI", "NDI"),
+                    "dose": ("Dosimeter", "Dose"), "pco": ("Planning Center", "PCO")}
+
+    def set_bottom_compact(self, on):
+        """Short names and tighter padding on the bottom bar so it fits on one line in a narrow window."""
+        if getattr(self, "_bottom_compact", None) == on:
+            return
+        self._bottom_compact = on
+        for bar in (self.out_bar, self.pop_bar):
+            for key, b in bar.items.items():
+                if key in self.BOTTOM_SHORT:
+                    b.setText(self.BOTTOM_SHORT[key][1 if on else 0])
+                    b.setStyleSheet("QPushButton { padding:5px 7px; }" if on else "")
 
     def resizeEvent(self, ev):
         self.fit_bars()
         super().resizeEvent(ev)
+        self.refit_later()
+
+    # ---------- easier-to-grab window edges (the 5 px margin around the content)
+    def _edges_at(self, pos):
+        e = QtCore.Qt.Edges()
+        if pos.x() <= 5:
+            e |= QtCore.Qt.LeftEdge
+        elif pos.x() >= self.width() - 6:
+            e |= QtCore.Qt.RightEdge
+        if pos.y() >= self.height() - 6:
+            e |= QtCore.Qt.BottomEdge
+        return e
+
+    def mousePressEvent(self, ev):
+        e = self._edges_at(ev.position().toPoint())
+        if ev.button() == QtCore.Qt.LeftButton and e:
+            self._edge_drag = (e, ev.globalPosition().toPoint(), self.geometry())
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._edge_drag:
+            e, p0, g = self._edge_drag
+            d = ev.globalPosition().toPoint() - p0
+            r = QtCore.QRect(g)
+            mn = self.minimumSizeHint()
+            if e & QtCore.Qt.RightEdge:
+                r.setWidth(max(mn.width(), g.width() + d.x()))
+            if e & QtCore.Qt.LeftEdge:
+                r.setLeft(min(g.left() + d.x(), g.right() - mn.width()))
+            if e & QtCore.Qt.BottomEdge:
+                r.setHeight(max(mn.height(), g.height() + d.y()))
+            self.setGeometry(r)
+            return
+        e = self._edges_at(ev.position().toPoint())
+        if e == (QtCore.Qt.RightEdge | QtCore.Qt.BottomEdge):
+            self.setCursor(QtCore.Qt.SizeFDiagCursor)
+        elif e == (QtCore.Qt.LeftEdge | QtCore.Qt.BottomEdge):
+            self.setCursor(QtCore.Qt.SizeBDiagCursor)
+        elif e & (QtCore.Qt.LeftEdge | QtCore.Qt.RightEdge):
+            self.setCursor(QtCore.Qt.SizeHorCursor)
+        elif e:
+            self.setCursor(QtCore.Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if self._edge_drag:
+            self._edge_drag = None
+            self.refit_later(0, 150)
+            return
+        super().mouseReleaseEvent(ev)
+
+    def leaveEvent(self, ev):
+        if not self._edge_drag:
+            self.unsetCursor()
+        super().leaveEvent(ev)
+
+    def refit_later(self, *delays):
+        """Re-wrap the toolbars once the window has really settled. On macOS a resize from code (¼ screen, Fit)
+        lands in steps, and the toolbars could keep the old layout until the next manual resize."""
+        for ms in (delays or (0,)):
+            QtCore.QTimer.singleShot(ms, self.refit)
+
+    def refit(self):
+        self._fit_w = None
+        self.fit_bars()
+        for bar in self.bars:
+            bar.updateGeometry()
+        for tb in self.findChildren(QtWidgets.QToolBar):
+            tb.updateGeometry()
+            if tb.layout() is not None:
+                tb.layout().invalidate()
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
 
     def showEvent(self, ev):
         self._fit_w = None
         self.fit_bars()
+        self.refit_later(0, 250)
         super().showEvent(ev)
 
     SHORTCUTS = [
@@ -5618,6 +5960,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.restoreState(QtCore.QByteArray(base64.b64decode(self.cfg["dock_state"])))
         except Exception:
             self.resize(int(scr.width() * 0.85), int(scr.height() * 0.85))
+        # toolbars always on their own rows, whatever an older saved layout says
+        main_tb = self.findChild(QtWidgets.QToolBar, "toolbar")
+        self.addToolBar(QtCore.Qt.TopToolBarArea, main_tb)
+        self.addToolBarBreak(QtCore.Qt.TopToolBarArea)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, self.tools_bar)
+        self.addToolBar(QtCore.Qt.BottomToolBarArea, self.outputs_bar)
         for d in self.docks.values():          # panels that were floating in 2.0 come back inside the window
             if d.isFloating():
                 d.setFloating(False)
@@ -5635,11 +5983,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
 
     def quarter_size(self):
-        """Half the screen's width and height (1/4 of its area), parked top-right."""
+        """Half the screen's width and height (1/4 of its area), resized where it is (its top-left corner stays
+        put, nudged only if that would push it off the screen)."""
         scr = (self.screen() or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
         self.showNormal()
+        g0 = self.frameGeometry()
         self.resize(scr.width() // 2, scr.height() // 2)
-        self.move(scr.right() - self.frameGeometry().width() + 1, scr.top())
+        g = self.frameGeometry()
+        x = min(max(g0.left(), scr.left()), scr.right() - g.width() + 1)
+        y = min(max(g0.top(), scr.top()), scr.bottom() - g.height() + 1)
+        self.move(x, y)
+        self.refit_later(0, 150, 400)
 
     def fit_to_screen(self):
         """Never open taller or wider than the screen (e.g. after moving from a bigger display)."""
@@ -5652,6 +6006,7 @@ class MainWindow(QtWidgets.QMainWindow):
         x = min(max(g.left(), scr.left()), scr.right() - g.width() + 1)
         y = min(max(g.top(), scr.top()), scr.bottom() - g.height() + 1)
         self.move(x, y)
+        self.refit_later(0, 150, 400)
 
     def refresh_profiles(self):
         self.prof_cb.blockSignals(True)
@@ -6076,7 +6431,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.pending_notes = []
                 self.log_path = path
                 self.log_started = time.time()
-                self.log_btn.setText("●  Logging")
+                self.log_btn.setText(" Logging"); self.log_btn.setIcon(rec_icon(True))
             except Exception as e:
                 self.log_btn.setChecked(False)
                 message(self, "error", APP_NAME, f"Could not start log:\n{e}")
@@ -6086,7 +6441,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.status.showMessage(f"Saved {self.log_rows} rows to {self.log_path}")
             was = self.log_writer is not None
             self.log_file = self.log_writer = None
-            self.log_btn.setText("●  Log")
+            self.log_btn.setText(" Log"); self.log_btn.setIcon(rec_icon(False))
             if self.sched_key and not self._sched_stopping:      # stopped by hand inside a schedule window
                 self.sched_skip.add(self.sched_key)
                 self.sched_key = None
