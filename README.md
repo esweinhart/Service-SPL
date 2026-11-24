@@ -27,6 +27,8 @@ needed) and on Windows.
 - **Dosimeter** and **Planning Center** open as pop-up cards over the dashboard (drag the title to move, corner to
   resize, ✕ to close). They never leave the main window and reopen where you left them. Their buttons sit on the
   right of the bottom bar
+- **Compact mode** (View → Compact mode): smaller fonts, padding and tiles so a ¼-screen window fits more. It turns on
+  by itself in small windows; on Windows the menu bar folds into a **☰** button. Or set it to always on / off
 - Toolbar buttons can be **dragged into your own order**: click the **🔒** (end of the top row) to unlock, drag,
   click again to lock. Dividers drag just like buttons while unlocked. Right-click a toolbar any time to **add a
   divider**, or right-click a divider to **remove** it (dragging one off the bar removes it too)
@@ -66,7 +68,7 @@ python spl_monitor.py
 ---
 
 ## 2. First run in 60 seconds
-1. Pick your mic in the input menu on the toolbar. A UMIK / UMM-6 / EMM-6 is picked automatically, then a Scarlett.
+1. Pick your mic in **Settings → Input** (device, channel and mic profile live there). A UMIK / UMM-6 / EMM-6 is picked automatically, then a Scarlett.
 2. Press **▶ Start**.
 3. Open **Settings → Meter → Calibration wizard…** (or Tools → Calibration wizard…) and follow the wizard (next section).
 4. Set **Red at** to your house limit. The reading turns yellow 5 dB before it and red at it, and the thumb flips down.
