@@ -23,7 +23,7 @@ except Exception:  # PortAudio missing -> simulator only
     sd = None
 
 APP_NAME = "ServiceSPL"
-APP_VERSION = "2.2.4"
+APP_VERSION = "2.2.5"
 if sys.platform == "darwin":
     _CFG_BASE = os.path.expanduser("~/Library/Application Support")
 else:
@@ -60,7 +60,7 @@ DEFAULTS = dict(
     autosave_dir="", autosave_reports=True, schedule=[],
     pink_source="app", pink_target=85.0,
     pco_app_id="", pco_target=95.0, pco_service_type=None,
-    win_geom=None, dock_state=None, bar_order={}, popups={}, vu_skin=False,
+    win_geom=None, dock_state=None, bar_order={}, popups={}, vu_skin=False, compact="auto",
 )
 
 # ---------------------------------------------------------------- DSP ----
@@ -679,7 +679,27 @@ def rec_icon(on):
     return QtGui.QIcon(pm)
 
 
+COMPACT = False     # compact mode: smaller fonts and padding so a quarter-screen window fits more
+
+
 def style_sheet():
+    return _style_sheet() + (_compact_qss() if COMPACT else "")
+
+
+def _compact_qss():
+    """Later rules win: tighter everything for compact mode."""
+    return f"""
+QWidget {{ font-size:9pt; }}
+QPushButton, QToolButton {{ padding:3px 8px; }}
+QPushButton#lockbtn {{ padding:2px 6px; font-size:10pt; }}
+QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{ padding:1px 4px; }}
+QDockWidget::title {{ padding:2px 6px; }}
+QMainWindow::separator {{ width:7px; height:7px; }}
+QToolBar {{ spacing:2px; padding:0px; }}
+"""
+
+
+def _style_sheet():
     tick = _check_svg()
     return f"""
 QRadioButton, QCheckBox {{ spacing:7px; background:transparent; }}
@@ -1020,6 +1040,8 @@ def exec_in_window(dlg):
     host._covers = getattr(host, "_covers", 0) + 1
     try:
         host.menuBar().setEnabled(False)
+        if getattr(host, "ham_btn", None) is not None:
+            host.ham_btn.setEnabled(False)
     except Exception:
         pass
     dlg.setFocus()
@@ -1030,6 +1052,8 @@ def exec_in_window(dlg):
         if host._covers <= 0:
             try:
                 host.menuBar().setEnabled(True)
+                if getattr(host, "ham_btn", None) is not None:
+                    host.ham_btn.setEnabled(True)
             except Exception:
                 pass
         host.removeEventFilter(cover)
@@ -1742,10 +1766,13 @@ class Tile(QtWidgets.QFrame):
         self.info.set_text(explain(title) or self.tip)
 
     def refresh_theme(self):
+        m = (6, 2, 6, 2) if COMPACT else (10, 6, 10, 6)     # compact mode: tighter tiles, the numbers get the room
+        self.layout().setContentsMargins(*m)
         if getattr(self, "big_title", False):      # main meter: make the weighting impossible to miss
-            self.t.setStyleSheet(f"color:{T['fg']}; font-size:12pt; font-weight:700; background:transparent;")
+            self.t.setStyleSheet(f"color:{T['fg']}; font-size:{10 if COMPACT else 12}pt; font-weight:700; "
+                                 "background:transparent;")
         else:
-            self.t.setStyleSheet(f"color:{T['dim']}; font-size:9pt; background:transparent;")
+            self.t.setStyleSheet(f"color:{T['dim']}; font-size:{8 if COMPACT else 9}pt; background:transparent;")
         self.s.setStyleSheet(f"color:{T['dim']}; font-size:8pt; background:transparent;")
         self._paint_value()
 
@@ -2568,7 +2595,9 @@ class MeterPanel(QtWidgets.QWidget):
             for i, t in enumerate(show):
                 self.grid.addWidget(t, i // cols, i % cols)
         rows = math.ceil(len(show) / cols)
-        tiles_h = rows * (70 if h >= 520 else 52)
+        tiles_h = rows * (44 if COMPACT else 70 if h >= 520 else 52)
+        self.grid.setSpacing(3 if COMPACT else 6)
+        self.layout().setContentsMargins(*((4, 2, 4, 2) if COMPACT else (8, 6, 8, 6)))
         top_h = max(h - tiles_h - 20, 100)
         self.main_tile.set_size(max(20, min(96, top_h * 0.13, w * 0.075)))
         self.thumb.set_size(max(36, min(130, top_h * 0.22, w * 0.12)))
@@ -2577,7 +2606,7 @@ class MeterPanel(QtWidgets.QWidget):
         self.bar.setVisible(not hist or top_h <= 200)
         for t in small:
             t.set_size(max(11, min(22, w / cols / 14, h / 30)))
-            t.s.setVisible(h >= 420)
+            t.s.setVisible(h >= 420 and not COMPACT)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -4306,7 +4335,7 @@ class EqPlot(QtWidgets.QWidget):
 GUIDE_PAGES = [
     ("Welcome", """<h2>Welcome to ServiceSPL</h2>
 <p>This guide walks you through setting up and using the meter. Pick a topic on the left, or press <b>Next</b>.</p>
-<ol><li><b>Pick your mic</b> in the toolbar input menu (a UMIK or other USB measurement mic is picked automatically).</li>
+<ol><li><b>Pick your mic</b> in Settings → Input (a UMIK or other USB measurement mic is picked automatically).</li>
 <li>Press <b>▶ Start</b>. The big number is the live level; the strip under it is the last few minutes.</li>
 <li><b>Calibrate</b> once per mic (next page), so the numbers are real dB SPL.</li>
 <li>Set <b>Red at</b> to your house limit. Everything turns yellow 5 dB before that and red at it.</li></ol>
@@ -4868,6 +4897,26 @@ class SettingsDialog(QtWidgets.QDialog):
         def page(name):
             w = QtWidgets.QWidget(); f = QtWidgets.QFormLayout(w); tabs.addTab(w, name); return f
 
+        # --- input: device, channel and mic profile (they rarely change mid-service, so they live here)
+        main = parent if hasattr(parent, "dev") else None
+        self.in_dev = None
+        if main is not None:
+            f = page("Input")
+            self.in_dev = QtWidgets.QComboBox()
+            for i in range(main.dev.count()):
+                self.in_dev.addItem(main.dev.itemText(i), main.dev.itemData(i))
+            self.in_dev.setCurrentIndex(main.dev.currentIndex())
+            self.in_ch = QtWidgets.QComboBox()
+            self.in_prof = QtWidgets.QComboBox(); self.in_prof.addItems(list(cfg["profiles"]))
+            self.in_prof.setCurrentText(cfg["profile"])
+            self._main_ch = main.ch.currentIndex()
+            self.in_dev.currentIndexChanged.connect(self._fill_in_ch)
+            self._fill_in_ch()
+            f.addRow("Input device", self.in_dev)
+            f.addRow("Channel", self.in_ch)
+            f.addRow("Mic profile", with_tip(self.in_prof, "Mic profile"))
+            f.addRow(QtWidgets.QLabel("Changing the input while the meter runs restarts it."))
+
         # --- meter
         f = page("Meter")
         self.w = QtWidgets.QComboBox(); self.w.addItems(["A", "C", "Z"]); self.w.setCurrentText(cfg["main_weight"])
@@ -4982,6 +5031,19 @@ class SettingsDialog(QtWidgets.QDialog):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "NDI library", "/", "NDI runtime (libndi*.dylib *.dll *.so*)")
         if path:
             self.ndi_lib.setText(path)
+
+    def _fill_in_ch(self, *_):
+        dev = self.in_dev.currentData()
+        n = 1
+        if dev is not None and dev not in ("sim", "simcal") and sd is not None:
+            try:
+                n = sd.query_devices(dev)["max_input_channels"]
+            except Exception:
+                pass
+        want = self.in_ch.currentIndex() if self.in_ch.count() else self._main_ch
+        self.in_ch.clear()
+        self.in_ch.addItems([f"Ch {i}" for i in range(1, max(1, n) + 1)])
+        self.in_ch.setCurrentIndex(min(max(want, 0), self.in_ch.count() - 1))
 
     def apply(self, cfg):
         cfg.update(main_weight=self.w.currentText(), main_time=self.t.currentText()[0],
@@ -5384,6 +5446,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.meter.set_vu(True)
         self.populate_devices()
         self.restore_layout()
+        self._adopt_shortcuts()
+        self.update_compact()
         self.update_menubar_meter()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -5565,14 +5629,27 @@ class MainWindow(QtWidgets.QMainWindow):
         rl.addWidget(lbl); rl.addWidget(self.red_at); rl.addWidget(red_tip)
         st = QtWidgets.QPushButton("Settings…"); st.clicked.connect(self.settings)
         self.top_bar = ReorderBar("top")
-        for key, w in (("input", self.dev), ("channel", self.ch), ("start", self.run_btn), ("profile", self.prof_cb),
-                       ("reset", rst), ("log", self.log_btn)):   # Marker lives in the Session panel
+        # input device, channel and mic profile live in Settings → Input (kept here, hidden, as the source of truth)
+        for w in (self.dev, self.ch, self.prof_cb):
+            w.setParent(self); w.hide()
+        for key, w in (("start", self.run_btn), ("reset", rst), ("log", self.log_btn)):   # Marker: Session panel
             self.top_bar.add(key, w)
         self.top_bar.divider("div_top1")
         self.top_bar.add("red_at", red)
         self.top_bar.divider("div_top2")
         self.top_bar.add("settings", st)
-        tb.addWidget(self.top_bar)
+        top_act = tb.addWidget(self.top_bar)
+        # compact mode on Windows / Linux: the menu bar folds into this ☰ button (macOS keeps its own menu bar)
+        self.ham_btn = QtWidgets.QToolButton(); self.ham_btn.setText("☰")
+        self.ham_btn.setToolTip("Menu: File, View, Tools, Help")
+        self.ham_btn.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.ham_btn.setStyleSheet("QToolButton { font-size:13pt; padding:1px 8px; } "
+                                   "QToolButton::menu-indicator { image:none; width:0; }")
+        self.ham_menu = QtWidgets.QMenu(self.ham_btn)
+        self.ham_menu.aboutToShow.connect(self._fill_ham_menu)
+        self.ham_btn.setMenu(self.ham_menu)
+        self.ham_act = tb.insertWidget(top_act, self.ham_btn)
+        self.ham_act.setVisible(False)
 
         # Mini, Web view and NDI: their own bar at the bottom of the window
         self.mini_btn = QtWidgets.QPushButton("Mini ⤡")
@@ -5631,7 +5708,7 @@ class MainWindow(QtWidgets.QMainWindow):
             d.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable | QtWidgets.QDockWidget.DockWidgetClosable)
             self.addDockWidget(area, d)
             self.docks[name] = d
-        self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Vertical)
+        self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Horizontal)   # side by side
         # Dosimeter and Planning Center: pop-up cards that float over the dashboard, inside the window
         self.docks["dose"] = PopupPanel("Dosimeter · OSHA / NIOSH", self.dose_panel, self, "dose", (420, 520))
         self.docks["pco"] = PopupPanel("Service · Planning Center Live", self.pco_panel, self, "pco", (620, 480))
@@ -5721,6 +5798,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lock_act = vm.addAction("Lock toolbar buttons", lambda: self.lock_btn.click())
         self.lock_act.setCheckable(True); self.lock_act.setChecked(True)
         vm.addAction("Reset toolbar button order", self.reset_bar_order)
+        cm = vm.addMenu("Compact mode")
+        grp = QtGui.QActionGroup(self)
+        self.compact_acts = {}
+        for key, text in (("auto", "Automatic (small windows, ¼ screen)"), ("on", "Always on"), ("off", "Off")):
+            a = cm.addAction(text, lambda k=key: self.set_compact_pref(k))
+            a.setCheckable(True); a.setChecked(self.cfg.get("compact", "auto") == key); grp.addAction(a)
+            self.compact_acts[key] = a
         vm.addSeparator()
         vm.addAction("Quarter-screen size", self.quarter_size)
         vm.addAction("Fit to screen", lambda: (self.resize(10_000, 10_000), self.fit_to_screen()))
@@ -5799,6 +5883,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_bars()
         super().resizeEvent(ev)
         self.refit_later()
+        if getattr(self, "_compact_done", False) and self.compact_wanted() != COMPACT:
+            QtCore.QTimer.singleShot(0, self.update_compact)
 
     # ---------- easier-to-grab window edges (the 5 px margin around the content)
     def _edges_at(self, pos):
@@ -5862,6 +5948,48 @@ class MainWindow(QtWidgets.QMainWindow):
         lands in steps, and the toolbars could keep the old layout until the next manual resize."""
         for ms in (delays or (0,)):
             QtCore.QTimer.singleShot(ms, self.refit)
+
+    def _fill_ham_menu(self):
+        self.ham_menu.clear()
+        for a in self.menuBar().actions():
+            if a.menu() is not None:
+                self.ham_menu.addMenu(a.menu())
+
+    def _adopt_shortcuts(self):
+        """Keep every menu shortcut working while the menu bar is hidden (compact mode)."""
+        def walk(menu):
+            for a in menu.actions():
+                if a.menu() is not None:
+                    walk(a.menu())
+                elif not a.shortcut().isEmpty() and a not in self.actions():
+                    self.addAction(a)
+        for a in self.menuBar().actions():
+            if a.menu() is not None:
+                walk(a.menu())
+
+    def compact_wanted(self):
+        pref = self.cfg.get("compact", "auto")
+        if pref in ("on", "off"):
+            return pref == "on"
+        return self.width() < 1100 or self.height() < 650
+
+    def set_compact_pref(self, key):
+        self.cfg["compact"] = key
+        self.save_cfg()
+        self.update_compact()
+
+    def update_compact(self):
+        global COMPACT
+        on = self.compact_wanted()
+        if on == COMPACT and getattr(self, "_compact_done", False):
+            return
+        self._compact_done = True
+        COMPACT = on
+        self.on_theme_change()
+        mac = sys.platform == "darwin"
+        self.menuBar().setVisible(mac or not on)
+        self.ham_act.setVisible(on and not mac)
+        self.refit_later(0, 150)
 
     def refit(self):
         self._fit_w = None
@@ -5965,6 +6093,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.restoreState(QtCore.QByteArray(base64.b64decode(self.cfg["dock_state"])))
         except Exception:
             self.resize(int(scr.width() * 0.85), int(scr.height() * 0.85))
+        # 2.2.5: RTA and Spectrogram sit side by side (left / right). Older saved layouts stacked them: re-split once.
+        if self.cfg.get("dock_layout_v", 1) < 2:
+            self.cfg["dock_layout_v"] = 2
+            if not self.docks["rta"].isFloating() and not self.docks["spectro"].isFloating():
+                self.splitDockWidget(self.docks["rta"], self.docks["spectro"], QtCore.Qt.Horizontal)
+                QtCore.QTimer.singleShot(0, self.default_dock_sizes)
         # toolbars always on their own rows, whatever an older saved layout says
         main_tb = self.findChild(QtWidgets.QToolBar, "toolbar")
         self.addToolBar(QtCore.Qt.TopToolBarArea, main_tb)
@@ -5982,9 +6116,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def default_dock_sizes(self):
         w, h = self.width(), self.height()
-        self.resizeDocks([self.docks["rta"]], [int(w * 0.32)], QtCore.Qt.Horizontal)
-        self.resizeDocks([self.docks["rta"], self.docks["spectro"]],
-                         [int(h * 0.5), int(h * 0.4)], QtCore.Qt.Vertical)
+        self.resizeDocks([self.docks["rta"], self.docks["spectro"]], [int(w * 0.24), int(w * 0.24)],
+                         QtCore.Qt.Horizontal)
         self.resizeDocks([self.docks["session"]], [int(h * 0.28)], QtCore.Qt.Vertical)
 
     def quarter_size(self):
@@ -6187,7 +6320,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.engine.dose = old.dose
         self.session.cal_info = prof.get("cal_info", "")
         self.pending = []
-        self.status.showMessage(f"Running @ {fs} Hz")
+        self.status.showMessage(f"Running @ {fs} Hz · {self.dev.currentText()} · {self.ch.currentText()}")
 
     def stop(self):
         if self.stream is not None:
@@ -6247,12 +6380,32 @@ class MainWindow(QtWidgets.QMainWindow):
         d = SettingsDialog(self.cfg, self)
         if exec_in_window(d):
             d.apply(self.cfg)
+            self.apply_input(d)
             if self.engine:
                 self.engine.long_min = self.cfg["long_leq_min"]
             self.apply_theme()
             self.on_theme_change()
             self.update_menubar_meter()
             self.save_cfg()
+
+    def apply_input(self, d):
+        """Settings → Input: switch device / channel / mic profile (restarting the meter if it was running)."""
+        if d.in_dev is None:
+            return
+        changed = (d.in_dev.currentIndex() != self.dev.currentIndex()
+                   or d.in_ch.currentIndex() != self.ch.currentIndex())
+        was = self.running()
+        if changed and was:
+            self.run_btn.click()
+        if d.in_dev.currentIndex() != self.dev.currentIndex():
+            self.dev.setCurrentIndex(d.in_dev.currentIndex())     # fills channels, may auto-pick a profile
+        if d.in_ch.currentIndex() < self.ch.count():
+            self.ch.setCurrentIndex(d.in_ch.currentIndex())
+        self.cfg.update(device=self.dev.currentText(), channel=self.ch.currentIndex() + 1)
+        if d.in_prof.currentText() and d.in_prof.currentText() != self.cfg["profile"]:
+            self.set_profile(d.in_prof.currentText())
+        if changed and was:
+            self.run_btn.click()
 
     def update_menubar_meter(self):
         if self.cfg["menubar"] and self.menubar_meter is None:
@@ -6746,7 +6899,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.docks["dose"].isVisible():
                 self.dose_panel.tick(e)
             self.session_panel.tick()
-            msg = f"Running @ {e.fs} Hz"
+            msg = f"Running @ {e.fs} Hz · {self.dev.currentText()} · {self.ch.currentText()}"
             if self.log_writer:
                 msg += f"   ·   Logging every {self.cfg['log_interval']} s → {self.log_rows} rows"
             if self.xruns:
